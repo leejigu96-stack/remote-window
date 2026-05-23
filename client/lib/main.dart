@@ -45,7 +45,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.6';
+const String kAppVersionFallback = '0.1.7';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -762,13 +762,12 @@ class _StreamPageState extends State<StreamPage> {
 
   final GlobalKey _imageKey = GlobalKey();
 
-  // 줌/팬 상태 (로컬 화면 변형)
-  double _scale = 1.0;
-  Offset _offset = Offset.zero;
-  double _baseScale = 1.0;
-  Offset _baseOffset = Offset.zero;
+  // InteractiveViewer 의 cumulative 변환 — 줌 상태 추적용
+  final TransformationController _ivController = TransformationController();
+  double get _ivScale => _ivController.value.getMaxScaleOnAxis();
 
-  // 2-손가락 스크롤 누적
+  // 2-손가락 스크롤 누적 (Listener 로 raw pointer 추적)
+  final Map<int, Offset> _pointers = {};
   double _scrollAccum = 0;
   DateTime _lastScrollSent = DateTime.now();
 
@@ -818,51 +817,34 @@ class _StreamPageState extends State<StreamPage> {
     }
   }
 
-  // ─── 스케일/줌/스크롤 제스처 ────────────────────────────
-  void _onScaleStart(ScaleStartDetails d) {
-    _baseScale = _scale;
-    _baseOffset = _offset;
-    _scrollAccum = 0;
+  // ─── Listener 로 raw pointer 추적 — 2손가락 스크롤만 처리 ──
+  void _onPointerDown(PointerDownEvent e) {
+    _pointers[e.pointer] = e.localPosition;
   }
 
-  void _onScaleUpdate(ScaleUpdateDetails d) {
-    if (d.pointerCount >= 2) {
-      final scaleChange = d.scale;
-      // 핀치 (확대/축소)
-      if ((scaleChange - 1.0).abs() > 0.03) {
-        setState(() {
-          _scale = (_baseScale * scaleChange).clamp(1.0, 5.0);
-          if (_scale <= 1.001) _offset = Offset.zero;
-        });
-      } else {
-        // 순수 이동 (2손가락 드래그)
-        if (_scale <= 1.05) {
-          // 줌 아닐 때 → 원격 PC 에 스크롤 전송
-          _scrollAccum += d.focalPointDelta.dy;
-          final now = DateTime.now();
-          if (now.difference(_lastScrollSent).inMilliseconds >= 50 &&
-              _scrollAccum.abs() >= 3) {
-            _sendScrollAtCenter(_scrollAccum);
-            _scrollAccum = 0;
-            _lastScrollSent = now;
-          }
-        } else {
-          // 줌 상태 → 로컬 팬
-          setState(() {
-            _offset += d.focalPointDelta;
-          });
-        }
+  void _onPointerMove(PointerMoveEvent e) {
+    _pointers[e.pointer] = e.localPosition;
+    if (_pointers.length >= 2 && _ivScale <= 1.05) {
+      // 2손가락 + 줌 아닐 때만 스크롤
+      _scrollAccum += e.delta.dy;
+      final now = DateTime.now();
+      if (now.difference(_lastScrollSent).inMilliseconds >= 30 &&
+          _scrollAccum.abs() >= 2) {
+        _sendScrollAtCenter(_scrollAccum);
+        _scrollAccum = 0;
+        _lastScrollSent = now;
       }
-    } else if (d.pointerCount == 1 && _scale > 1.05) {
-      // 줌 상태에서 1손가락 드래그 = 로컬 팬
-      setState(() {
-        _offset += d.focalPointDelta;
-      });
     }
   }
 
-  void _onScaleEnd(ScaleEndDetails d) {
-    _scrollAccum = 0;
+  void _onPointerUp(PointerUpEvent e) {
+    _pointers.remove(e.pointer);
+    if (_pointers.length < 2) _scrollAccum = 0;
+  }
+
+  void _onPointerCancel(PointerCancelEvent e) {
+    _pointers.remove(e.pointer);
+    if (_pointers.length < 2) _scrollAccum = 0;
   }
 
   /// 화면 중앙 좌표로 스크롤 이벤트 전송
@@ -943,22 +925,18 @@ class _StreamPageState extends State<StreamPage> {
     } catch (_) {}
   }
 
-  // 화면 좌표 → 원본 윈도우 좌표 변환 (현재 줌/팬 Transform 역적용)
+  // 화면 좌표 → 원본 윈도우 좌표 변환
+  // GestureDetector 는 Image 직속 자식 → localPosition 이 이미 이미지 좌표
+  // (InteractiveViewer 가 외곽에서 transform 처리해줌)
   Offset _toWindowCoords(Offset localPos) {
     final ctx = _imageKey.currentContext;
     if (ctx == null) return Offset.zero;
     final box = ctx.findRenderObject() as RenderBox?;
     if (box == null) return Offset.zero;
-    final imgSize = box.size; // 이미지 표시 영역 (pre-transform)
-    // GestureDetector 의 localPos 는 화면 좌표.
-    // Transform 은 이미지 중앙을 기준으로 scale + offset 적용 → 역변환 필요.
-    final centerX = imgSize.width / 2;
-    final centerY = imgSize.height / 2;
-    final ix = (localPos.dx - centerX - _offset.dx) / _scale + centerX;
-    final iy = (localPos.dy - centerY - _offset.dy) / _scale + centerY;
-    final sx = widget.window.width / imgSize.width;
-    final sy = widget.window.height / imgSize.height;
-    return Offset(ix * sx, iy * sy);
+    final size = box.size;
+    final sx = widget.window.width / size.width;
+    final sy = widget.window.height / size.height;
+    return Offset(localPos.dx * sx, localPos.dy * sy);
   }
 
   void _sendInput(Map<String, dynamic> event) {
@@ -1078,6 +1056,7 @@ class _StreamPageState extends State<StreamPage> {
     _kbCtrl.removeListener(_onKeyboardInput);
     _kbCtrl.dispose();
     _kbFocus.dispose();
+    _ivController.dispose();
     _ch?.sink.add(jsonEncode({'action': 'stop'}));
     _ch?.sink.close();
     super.dispose();
@@ -1120,31 +1099,36 @@ class _StreamPageState extends State<StreamPage> {
               : Stack(
                   fit: StackFit.expand,
                   children: [
-                    // 비주얼 — Transform 으로 직접 줌/팬
-                    Center(
-                      child: Transform(
-                        transform: Matrix4.identity()
-                          ..translate(_offset.dx, _offset.dy)
-                          ..scale(_scale),
-                        alignment: Alignment.center,
-                        child: Image.memory(
-                          _frame!,
-                          key: _imageKey,
-                          gaplessPlayback: true,
-                          fit: BoxFit.contain,
+                    // 비주얼 + 제스처: InteractiveViewer 가 핀치줌 + (줌 상태일 때) 팬,
+                    // Listener 가 외곽에서 raw pointer 추적해 2손가락 스크롤 감지.
+                    // GestureDetector 는 onTap / onLongPress / onDoubleTap 전용
+                    // (onScale* 와 같이 두면 Tap 이 안 먹히는 Flutter 한계)
+                    Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: _onPointerDown,
+                      onPointerMove: _onPointerMove,
+                      onPointerUp: _onPointerUp,
+                      onPointerCancel: _onPointerCancel,
+                      child: InteractiveViewer(
+                        transformationController: _ivController,
+                        minScale: 1.0,
+                        maxScale: 5.0,
+                        panEnabled: true,
+                        scaleEnabled: true,
+                        child: Center(
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTapUp: _onTap,
+                            onDoubleTapDown: _onDoubleTap,
+                            onLongPressStart: _onLongPress,
+                            child: Image.memory(
+                              _frame!,
+                              key: _imageKey,
+                              gaplessPlayback: true,
+                              fit: BoxFit.contain,
+                            ),
+                          ),
                         ),
-                      ),
-                    ),
-                    // 제스처 — 화면 전체. Transform 위에 깔아서 모든 영역에서 작동
-                    Positioned.fill(
-                      child: GestureDetector(
-                        behavior: HitTestBehavior.translucent,
-                        onTapUp: _onTap,
-                        onDoubleTapDown: _onDoubleTap,
-                        onLongPressStart: _onLongPress,
-                        onScaleStart: _onScaleStart,
-                        onScaleUpdate: _onScaleUpdate,
-                        onScaleEnd: _onScaleEnd,
                       ),
                     ),
                     // 우측 가장자리 스크롤 보조 버튼
