@@ -33,6 +33,23 @@ class UpdateInfo {
 }
 
 class Updater {
+  /// 앱 임시 폴더에서 이전에 다운받은 APK 파일 모두 삭제.
+  /// - 앱 시작 시 호출 → 잔여 파일 청소
+  /// - 새 APK 다운로드 직전에도 호출
+  static Future<void> cleanupOldApks() async {
+    try {
+      final dir = await getTemporaryDirectory();
+      if (!await dir.exists()) return;
+      await for (final entity in dir.list(followLinks: false)) {
+        if (entity is File && entity.path.toLowerCase().endsWith('.apk')) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+  }
+
   /// 새 버전 있으면 UpdateInfo, 없으면 null
   static Future<UpdateInfo?> checkLatest() async {
     try {
@@ -105,6 +122,8 @@ class Updater {
     }
 
     final dir = await getTemporaryDirectory();
+    // 이전에 받아둔 APK 파일 전부 정리 (같은 이름이든 다른 버전이든)
+    await cleanupOldApks();
     final file = File('${dir.path}/RemoteWindow-${info.version}.apk');
     if (await file.exists()) await file.delete();
 

@@ -43,9 +43,12 @@ class ConnectPage extends StatefulWidget {
   State<ConnectPage> createState() => _ConnectPageState();
 }
 
+// pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
+const String kAppVersionFallback = '0.1.3';
+
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
-  String _version = '';
+  String _version = kAppVersionFallback;
   UpdateInfo? _availableUpdate;
   bool _tailscaleInstalled = true; // 초기엔 가정만 — 체크 후 갱신
 
@@ -107,6 +110,8 @@ class _ConnectPageState extends State<ConnectPage> {
       final info = await PackageInfo.fromPlatform();
       if (mounted) setState(() => _version = info.version);
     } catch (_) {}
+    // 시작 시 이전 APK 잔여물 청소 (이전 업데이트들에서 남은 파일)
+    Updater.cleanupOldApks();
     // 백그라운드로 업데이트 체크
     final upd = await Updater.checkLatest();
     if (mounted && upd != null) setState(() => _availableUpdate = upd);
@@ -150,7 +155,21 @@ class _ConnectPageState extends State<ConnectPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('RemoteWindow'),
+        title: Row(
+          children: [
+            const Text('RemoteWindow'),
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text('v$_version',
+                  style: const TextStyle(fontSize: 12)),
+            ),
+          ],
+        ),
         actions: [
           if (_availableUpdate != null)
             IconButton(
@@ -511,13 +530,54 @@ class WindowListPage extends StatefulWidget {
 class _WindowListPageState extends State<WindowListPage> {
   WebSocketChannel? _ch;
   List<WindowInfo> _windows = [];
+  Set<String> _hidden = {};  // 사용자가 숨긴 윈도우 키 (앱 단위 또는 제목 단위)
   String? _error;
   bool _loading = true;
+  bool _showHidden = false;  // 토글: 숨김도 표시
 
   @override
   void initState() {
     super.initState();
+    _loadHidden();
     _connect();
+  }
+
+  Future<void> _loadHidden() async {
+    final p = await SharedPreferences.getInstance();
+    final list = p.getStringList('hidden_windows') ?? [];
+    if (mounted) setState(() => _hidden = list.toSet());
+  }
+
+  Future<void> _saveHidden() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList('hidden_windows', _hidden.toList());
+  }
+
+  String _keyFor(WindowInfo w) {
+    // 윈도우 단위로 숨기지 말고 — 앱 + 제목 패턴으로
+    return '${w.appName}|${w.title}';
+  }
+
+  Future<void> _toggleHide(WindowInfo w) async {
+    final key = _keyFor(w);
+    setState(() {
+      if (_hidden.contains(key)) {
+        _hidden.remove(key);
+      } else {
+        _hidden.add(key);
+      }
+    });
+    await _saveHidden();
+  }
+
+  Future<void> _resetHidden() async {
+    setState(() => _hidden.clear());
+    await _saveHidden();
+  }
+
+  List<WindowInfo> get _filtered {
+    if (_showHidden) return _windows;
+    return _windows.where((w) => !_hidden.contains(_keyFor(w))).toList();
   }
 
   Future<void> _connect() async {
@@ -589,9 +649,18 @@ class _WindowListPageState extends State<WindowListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('윈도우 선택'),
+        title: Text(_hidden.isEmpty
+            ? '윈도우 선택'
+            : '윈도우 선택 (숨김 ${_hidden.length})'),
         actions: [
           IconButton(
+            tooltip: _showHidden ? '숨김 가리기' : '숨김도 표시',
+            icon: Icon(
+                _showHidden ? Icons.visibility_off : Icons.visibility),
+            onPressed: () => setState(() => _showHidden = !_showHidden),
+          ),
+          IconButton(
+            tooltip: '새로고침',
             icon: const Icon(Icons.refresh),
             onPressed: () {
               setState(() {
@@ -602,6 +671,17 @@ class _WindowListPageState extends State<WindowListPage> {
               _ch?.sink.close();
               _connect();
             },
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'reset') _resetHidden();
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                value: 'reset',
+                child: Text('숨김 목록 초기화'),
+              ),
+            ],
           ),
         ],
       ),
@@ -622,18 +702,35 @@ class _WindowListPageState extends State<WindowListPage> {
                   },
                 )
               : ListView.separated(
-                  itemCount: _windows.length,
+                  itemCount: _filtered.length,
                   separatorBuilder: (_, __) =>
                       const Divider(height: 1, color: Colors.white12),
                   itemBuilder: (_, i) {
-                    final w = _windows[i];
+                    final w = _filtered[i];
+                    final isHidden = _hidden.contains(_keyFor(w));
                     return ListTile(
-                      leading: const Icon(Icons.window),
+                      leading: Icon(
+                        isHidden ? Icons.visibility_off : Icons.window,
+                        color: isHidden ? Colors.white38 : null,
+                      ),
                       title: Text(w.title,
-                          maxLines: 1, overflow: TextOverflow.ellipsis),
-                      subtitle: Text('${w.appName}  •  ${w.width}×${w.height}'),
-                      trailing: const Icon(Icons.chevron_right),
-                      onTap: () => _open(w),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: isHidden ? Colors.white38 : null)),
+                      subtitle: Text('${w.appName}  •  ${w.width}×${w.height}',
+                          style: TextStyle(
+                              color: isHidden ? Colors.white24 : null)),
+                      trailing: IconButton(
+                        icon: Icon(
+                          isHidden ? Icons.visibility : Icons.visibility_off,
+                          size: 20,
+                        ),
+                        tooltip: isHidden ? '다시 표시' : '숨기기',
+                        onPressed: () => _toggleHide(w),
+                      ),
+                      onTap: isHidden ? null : () => _open(w),
+                      onLongPress: () => _toggleHide(w),
                     );
                   },
                 ),
@@ -758,6 +855,111 @@ class _StreamPageState extends State<StreamPage> {
     });
   }
 
+  void _sendKey(String text) {
+    if (text.isEmpty) return;
+    _sendInput({'type': 'key', 'text': text});
+  }
+
+  void _sendCombo(List<String> keys) {
+    _sendInput({'type': 'keycombo', 'keys': keys});
+  }
+
+  Future<void> _showKeyboardSheet() async {
+    final ctrl = TextEditingController();
+    final focusNode = FocusNode();
+    bool stillOpen = true;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1A1D22),
+      builder: (ctx) {
+        // 시트 열리자마자 키보드 자동 포커스
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          focusNode.requestFocus();
+        });
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+            left: 12,
+            right: 12,
+            top: 12,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: ctrl,
+                focusNode: focusNode,
+                autofocus: true,
+                maxLines: 3,
+                minLines: 1,
+                decoration: InputDecoration(
+                  hintText: '입력 (Enter 누르면 PC로 전송)',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    icon: const Icon(Icons.send),
+                    onPressed: () {
+                      _sendKey(ctrl.text);
+                      ctrl.clear();
+                    },
+                  ),
+                ),
+                onSubmitted: (txt) {
+                  _sendKey(txt);
+                  // Enter 도 같이 보냄
+                  _sendCombo(['enter']);
+                  ctrl.clear();
+                  focusNode.requestFocus();
+                },
+              ),
+              const SizedBox(height: 8),
+              // 자주 쓰는 특수키 단축 버튼들
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _comboChip('Enter', ['enter']),
+                  _comboChip('Tab', ['tab']),
+                  _comboChip('Esc', ['escape']),
+                  _comboChip('←', ['left']),
+                  _comboChip('→', ['right']),
+                  _comboChip('↑', ['up']),
+                  _comboChip('↓', ['down']),
+                  _comboChip('Backspace', ['backspace']),
+                  _comboChip('Ctrl+C', ['ctrl', 'c']),
+                  _comboChip('Ctrl+V', ['ctrl', 'v']),
+                  _comboChip('Ctrl+A', ['ctrl', 'a']),
+                  _comboChip('Ctrl+Z', ['ctrl', 'z']),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton(
+                  onPressed: () {
+                    stillOpen = false;
+                    Navigator.pop(ctx);
+                  },
+                  child: const Text('닫기'),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
+        );
+      },
+    );
+    // 시트 닫힌 후 cleanup
+    if (!stillOpen) ctrl.dispose();
+  }
+
+  Widget _comboChip(String label, List<String> keys) {
+    return ActionChip(
+      label: Text(label),
+      onPressed: () => _sendCombo(keys),
+    );
+  }
+
   @override
   void dispose() {
     _ch?.sink.add(jsonEncode({'action': 'stop'}));
@@ -772,11 +974,16 @@ class _StreamPageState extends State<StreamPage> {
         title: Text(widget.window.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          IconButton(
+            tooltip: '키보드 입력',
+            icon: const Icon(Icons.keyboard),
+            onPressed: _showKeyboardSheet,
+          ),
           Center(
               child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 8),
             child: Text('${_measuredFps.toStringAsFixed(1)} fps',
-                style: const TextStyle(fontSize: 12)),
+                style: const TextStyle(fontSize: 11)),
           )),
         ],
       ),
