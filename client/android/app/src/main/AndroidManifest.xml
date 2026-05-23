@@ -52,5 +52,7 @@
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
         </intent>
+        <!-- Tailscale 설치 여부 확인용 -->
+        <package android:name="com.tailscale.ipn"/>
     </queries>
 </manifest>

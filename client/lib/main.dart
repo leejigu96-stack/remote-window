@@ -13,6 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 
+import 'tailscale.dart';
 import 'updater.dart';
 import 'upload.dart';
 
@@ -46,12 +47,54 @@ class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
   String _version = '';
   UpdateInfo? _availableUpdate;
+  bool _tailscaleInstalled = true; // 초기엔 가정만 — 체크 후 갱신
 
   @override
   void initState() {
     super.initState();
     _load();
     _checkVersion();
+    _checkTailscale();
+  }
+
+  Future<void> _checkTailscale() async {
+    final ok = await Tailscale.isInstalled();
+    if (!mounted) return;
+    setState(() => _tailscaleInstalled = ok);
+    if (!ok) {
+      // 첫 진입 시 자동으로 안내 다이얼로그
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showTailscaleInstallDialog();
+      });
+    }
+  }
+
+  void _showTailscaleInstallDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('Tailscale 설치 필요'),
+        content: const Text(
+          'RemoteWindow 는 Tailscale VPN 으로 매장 PC에 연결합니다.\n\n'
+          'Tailscale 앱을 먼저 설치하고, 매장 PC 와 같은 구글 계정으로 로그인해 주세요.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('나중에'),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              Navigator.pop(context);
+              await Tailscale.openPlayStore();
+            },
+            icon: const Icon(Icons.shop),
+            label: const Text('Play Store 에서 설치'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _load() async {
@@ -153,6 +196,60 @@ class _ConnectPageState extends State<ConnectPage> {
                 child: Text('파일 / 사진 보내기', style: TextStyle(fontSize: 16)),
               ),
             ),
+            const SizedBox(height: 12),
+            if (!_tailscaleInstalled)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.orange, width: 1),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.warning, color: Colors.orange, size: 18),
+                        SizedBox(width: 6),
+                        Text('Tailscale 앱이 설치되지 않음',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.orange)),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Tailscale VPN 없이는 매장 PC 와 연결할 수 없습니다.',
+                      style: TextStyle(fontSize: 12, color: Colors.white70),
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton.icon(
+                      onPressed: Tailscale.openPlayStore,
+                      icon: const Icon(Icons.shop),
+                      label: const Text('Play Store 에서 설치'),
+                    ),
+                  ],
+                ),
+              )
+            else
+              Row(
+                children: [
+                  const Icon(Icons.check_circle,
+                      color: Colors.greenAccent, size: 16),
+                  const SizedBox(width: 6),
+                  const Text('Tailscale 설치됨',
+                      style: TextStyle(
+                          fontSize: 12, color: Colors.greenAccent)),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: Tailscale.launch,
+                    icon: const Icon(Icons.open_in_new, size: 16),
+                    label: const Text('Tailscale 열기'),
+                  ),
+                ],
+              ),
             const Spacer(),
             const Text(
               '※ Tailscale VPN 켜져 있어야 함\n※ 같은 Tailnet 인 매장 PC 가상 IP 입력',
