@@ -7,6 +7,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -44,7 +45,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.5';
+const String kAppVersionFallback = '0.1.6';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -761,41 +762,110 @@ class _StreamPageState extends State<StreamPage> {
 
   final GlobalKey _imageKey = GlobalKey();
 
-  // 2-손가락 스크롤 추적
-  final Map<int, Offset> _pointers = {};
+  // 줌/팬 상태 (로컬 화면 변형)
+  double _scale = 1.0;
+  Offset _offset = Offset.zero;
+  double _baseScale = 1.0;
+  Offset _baseOffset = Offset.zero;
+
+  // 2-손가락 스크롤 누적
   double _scrollAccum = 0;
   DateTime _lastScrollSent = DateTime.now();
 
-  void _onPointerDown(PointerDownEvent e) {
-    _pointers[e.pointer] = e.localPosition;
+  // 키보드 (Google RD 방식) — 숨김 TextField + zero-width space padding
+  static const String _kbPad = '​';
+  final TextEditingController _kbCtrl = TextEditingController(text: _kbPad);
+  final FocusNode _kbFocus = FocusNode();
+
+  @override
+  void initState() {
+    super.initState();
+    _kbCtrl.addListener(_onKeyboardInput);
+    _connect();
   }
 
-  void _onPointerMove(PointerMoveEvent e) {
-    _pointers[e.pointer] = e.localPosition;
-    if (_pointers.length >= 2) {
-      _scrollAccum += e.delta.dy;
-      final now = DateTime.now();
-      // 80ms 마다 묶어서 전송
-      if ((now.difference(_lastScrollSent).inMilliseconds >= 80) &&
-          _scrollAccum.abs() >= 6) {
-        _sendScrollAtCenter(_scrollAccum);
-        _scrollAccum = 0;
-        _lastScrollSent = now;
-      }
+  void _onKeyboardInput() {
+    final v = _kbCtrl.value;
+    // IME 조합 중이면 대기 (한글 입력 등)
+    if (v.composing.isValid && !v.composing.isCollapsed) return;
+    final t = v.text;
+    if (t == _kbPad) return; // 초기 상태
+    if (t.isEmpty) {
+      // 백스페이스 (padding 까지 삭제됨)
+      _sendCombo(['backspace']);
+    } else if (t.startsWith(_kbPad)) {
+      // 새 문자 입력됨 (padding 뒤에 붙음)
+      final added = t.substring(1);
+      _sendKey(added);
+    } else {
+      // padding 사라진 비정상 케이스 — 그냥 보냄
+      _sendKey(t);
+    }
+    // 다음 입력 받기 위해 padding 복원
+    _kbCtrl.value = const TextEditingValue(
+      text: _kbPad,
+      selection: TextSelection.collapsed(offset: 1),
+    );
+  }
+
+  void _toggleKeyboard() {
+    if (_kbFocus.hasFocus) {
+      _kbFocus.unfocus();
+    } else {
+      FocusScope.of(context).requestFocus(_kbFocus);
+      // 명시적으로 안드로이드 IME 호출 (autofocus 만으로 안 뜨는 경우 대비)
+      SystemChannels.textInput.invokeMethod('TextInput.show');
     }
   }
 
-  void _onPointerUp(PointerUpEvent e) {
-    _pointers.remove(e.pointer);
-    if (_pointers.length < 2) _scrollAccum = 0;
+  // ─── 스케일/줌/스크롤 제스처 ────────────────────────────
+  void _onScaleStart(ScaleStartDetails d) {
+    _baseScale = _scale;
+    _baseOffset = _offset;
+    _scrollAccum = 0;
   }
 
-  void _onPointerCancel(PointerCancelEvent e) {
-    _pointers.remove(e.pointer);
-    if (_pointers.length < 2) _scrollAccum = 0;
+  void _onScaleUpdate(ScaleUpdateDetails d) {
+    if (d.pointerCount >= 2) {
+      final scaleChange = d.scale;
+      // 핀치 (확대/축소)
+      if ((scaleChange - 1.0).abs() > 0.03) {
+        setState(() {
+          _scale = (_baseScale * scaleChange).clamp(1.0, 5.0);
+          if (_scale <= 1.001) _offset = Offset.zero;
+        });
+      } else {
+        // 순수 이동 (2손가락 드래그)
+        if (_scale <= 1.05) {
+          // 줌 아닐 때 → 원격 PC 에 스크롤 전송
+          _scrollAccum += d.focalPointDelta.dy;
+          final now = DateTime.now();
+          if (now.difference(_lastScrollSent).inMilliseconds >= 50 &&
+              _scrollAccum.abs() >= 3) {
+            _sendScrollAtCenter(_scrollAccum);
+            _scrollAccum = 0;
+            _lastScrollSent = now;
+          }
+        } else {
+          // 줌 상태 → 로컬 팬
+          setState(() {
+            _offset += d.focalPointDelta;
+          });
+        }
+      }
+    } else if (d.pointerCount == 1 && _scale > 1.05) {
+      // 줌 상태에서 1손가락 드래그 = 로컬 팬
+      setState(() {
+        _offset += d.focalPointDelta;
+      });
+    }
   }
 
-  /// 화면 중앙 좌표로 스크롤 이벤트 (휠 방향 = -dy: 손가락 위로 올리면 페이지 아래로)
+  void _onScaleEnd(ScaleEndDetails d) {
+    _scrollAccum = 0;
+  }
+
+  /// 화면 중앙 좌표로 스크롤 이벤트 전송
   void _sendScrollAtCenter(double dy) {
     final ctx = _imageKey.currentContext;
     if (ctx == null) return;
@@ -803,8 +873,7 @@ class _StreamPageState extends State<StreamPage> {
     if (box == null) return;
     final center = Offset(box.size.width / 2, box.size.height / 2);
     final p = _toWindowCoords(center);
-    // 마우스 휠 단위: 120 = 한 줄. dy 픽셀당 ~5 곱함.
-    final delta = (-dy * 5).round();
+    final delta = (-dy * 6).round();
     _sendInput({
       'type': 'scroll',
       'x': p.dx.round(),
@@ -828,12 +897,6 @@ class _StreamPageState extends State<StreamPage> {
       'delta_x': 0,
       'delta_y': dyWheel,
     });
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    _connect();
   }
 
   Future<void> _connect() async {
@@ -880,16 +943,22 @@ class _StreamPageState extends State<StreamPage> {
     } catch (_) {}
   }
 
-  // 화면 좌표 → 원본 윈도우 좌표 변환
+  // 화면 좌표 → 원본 윈도우 좌표 변환 (현재 줌/팬 Transform 역적용)
   Offset _toWindowCoords(Offset localPos) {
     final ctx = _imageKey.currentContext;
     if (ctx == null) return Offset.zero;
     final box = ctx.findRenderObject() as RenderBox?;
     if (box == null) return Offset.zero;
-    final size = box.size;
-    final sx = widget.window.width / size.width;
-    final sy = widget.window.height / size.height;
-    return Offset(localPos.dx * sx, localPos.dy * sy);
+    final imgSize = box.size; // 이미지 표시 영역 (pre-transform)
+    // GestureDetector 의 localPos 는 화면 좌표.
+    // Transform 은 이미지 중앙을 기준으로 scale + offset 적용 → 역변환 필요.
+    final centerX = imgSize.width / 2;
+    final centerY = imgSize.height / 2;
+    final ix = (localPos.dx - centerX - _offset.dx) / _scale + centerX;
+    final iy = (localPos.dy - centerY - _offset.dy) / _scale + centerY;
+    final sx = widget.window.width / imgSize.width;
+    final sy = widget.window.height / imgSize.height;
+    return Offset(ix * sx, iy * sy);
   }
 
   void _sendInput(Map<String, dynamic> event) {
@@ -935,64 +1004,6 @@ class _StreamPageState extends State<StreamPage> {
 
   void _sendCombo(List<String> keys) {
     _sendInput({'type': 'keycombo', 'keys': keys});
-  }
-
-  Future<void> _showKeyboardSheet() async {
-    final ctrl = TextEditingController();
-    final focusNode = FocusNode();
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF1A1D22),
-      builder: (ctx) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          focusNode.requestFocus();
-        });
-        return StatefulBuilder(builder: (ctx, setSheet) {
-          return Padding(
-            padding: EdgeInsets.only(
-              bottom: MediaQuery.of(ctx).viewInsets.bottom,
-              left: 12,
-              right: 12,
-              top: 12,
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                TextField(
-                  controller: ctrl,
-                  focusNode: focusNode,
-                  autofocus: true,
-                  maxLines: 1,
-                  decoration: InputDecoration(
-                    hintText: '입력 후 ▶ 전송',
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                    suffixIcon: IconButton(
-                      icon: const Icon(Icons.send),
-                      onPressed: () {
-                        _sendKey(ctrl.text);
-                        ctrl.clear();
-                        focusNode.requestFocus();
-                      },
-                    ),
-                  ),
-                  onSubmitted: (txt) {
-                    _sendKey(txt);
-                    _sendCombo(['enter']);
-                    ctrl.clear();
-                    focusNode.requestFocus();
-                  },
-                ),
-                const SizedBox(height: 6),
-              ],
-            ),
-          );
-        });
-      },
-    );
-    ctrl.dispose();
-    focusNode.dispose();
   }
 
   /// 특수키 패널 (별도 호출)
@@ -1064,6 +1075,9 @@ class _StreamPageState extends State<StreamPage> {
 
   @override
   void dispose() {
+    _kbCtrl.removeListener(_onKeyboardInput);
+    _kbCtrl.dispose();
+    _kbFocus.dispose();
     _ch?.sink.add(jsonEncode({'action': 'stop'}));
     _ch?.sink.close();
     super.dispose();
@@ -1079,7 +1093,7 @@ class _StreamPageState extends State<StreamPage> {
           IconButton(
             tooltip: '키보드 입력',
             icon: const Icon(Icons.keyboard),
-            onPressed: _showKeyboardSheet,
+            onPressed: _toggleKeyboard,
           ),
           IconButton(
             tooltip: '특수키 / 단축키',
@@ -1104,31 +1118,33 @@ class _StreamPageState extends State<StreamPage> {
           : _frame == null
               ? const Center(child: CircularProgressIndicator())
               : Stack(
+                  fit: StackFit.expand,
                   children: [
-                    Listener(
-                      behavior: HitTestBehavior.translucent,
-                      onPointerDown: _onPointerDown,
-                      onPointerMove: _onPointerMove,
-                      onPointerUp: _onPointerUp,
-                      onPointerCancel: _onPointerCancel,
-                      child: InteractiveViewer(
-                        minScale: 1.0,
-                        maxScale: 5.0,
-                        panEnabled: true,
-                        scaleEnabled: true,
-                        child: Center(
-                          child: GestureDetector(
-                            onTapUp: _onTap,
-                            onDoubleTapDown: _onDoubleTap,
-                            onLongPressStart: _onLongPress,
-                            child: Image.memory(
-                              _frame!,
-                              key: _imageKey,
-                              gaplessPlayback: true,
-                              fit: BoxFit.contain,
-                            ),
-                          ),
+                    // 비주얼 — Transform 으로 직접 줌/팬
+                    Center(
+                      child: Transform(
+                        transform: Matrix4.identity()
+                          ..translate(_offset.dx, _offset.dy)
+                          ..scale(_scale),
+                        alignment: Alignment.center,
+                        child: Image.memory(
+                          _frame!,
+                          key: _imageKey,
+                          gaplessPlayback: true,
+                          fit: BoxFit.contain,
                         ),
+                      ),
+                    ),
+                    // 제스처 — 화면 전체. Transform 위에 깔아서 모든 영역에서 작동
+                    Positioned.fill(
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTapUp: _onTap,
+                        onDoubleTapDown: _onDoubleTap,
+                        onLongPressStart: _onLongPress,
+                        onScaleStart: _onScaleStart,
+                        onScaleUpdate: _onScaleUpdate,
+                        onScaleEnd: _onScaleEnd,
                       ),
                     ),
                     // 우측 가장자리 스크롤 보조 버튼
@@ -1140,10 +1156,34 @@ class _StreamPageState extends State<StreamPage> {
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            _scrollFab(Icons.keyboard_arrow_up, () => _scrollButton(120)),
+                            _scrollFab(Icons.keyboard_arrow_up,
+                                () => _scrollButton(120)),
                             const SizedBox(height: 8),
-                            _scrollFab(Icons.keyboard_arrow_down, () => _scrollButton(-120)),
+                            _scrollFab(Icons.keyboard_arrow_down,
+                                () => _scrollButton(-120)),
                           ],
+                        ),
+                      ),
+                    ),
+                    // 숨김 TextField — 키보드 입력 받기 (Google RD 방식)
+                    Positioned(
+                      left: 0,
+                      top: -100,
+                      child: SizedBox(
+                        width: 1,
+                        height: 1,
+                        child: TextField(
+                          controller: _kbCtrl,
+                          focusNode: _kbFocus,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          showCursor: false,
+                          maxLines: 1,
+                          decoration: const InputDecoration(
+                            border: InputBorder.none,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                          style: const TextStyle(color: Colors.transparent),
                         ),
                       ),
                     ),
