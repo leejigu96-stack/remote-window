@@ -101,13 +101,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<UploadState>) {
                             loop {
                                 match capture::capture_window_jpeg(window_id, quality) {
                                     Ok(bytes) => {
-                                        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                                        let msg = serde_json::json!({
-                                            "type":"frame",
-                                            "window_id": window_id,
-                                            "jpeg_b64": b64
-                                        });
-                                        if tx.send(Message::Text(msg.to_string())).is_err() {
+                                        // 바이너리 프레임 그대로 (base64 X)
+                                        if tx.send(Message::Binary(bytes)).is_err() {
                                             break;
                                         }
                                     }

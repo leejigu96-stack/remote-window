@@ -44,7 +44,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.4';
+const String kAppVersionFallback = '0.1.5';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -761,6 +761,75 @@ class _StreamPageState extends State<StreamPage> {
 
   final GlobalKey _imageKey = GlobalKey();
 
+  // 2-손가락 스크롤 추적
+  final Map<int, Offset> _pointers = {};
+  double _scrollAccum = 0;
+  DateTime _lastScrollSent = DateTime.now();
+
+  void _onPointerDown(PointerDownEvent e) {
+    _pointers[e.pointer] = e.localPosition;
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    _pointers[e.pointer] = e.localPosition;
+    if (_pointers.length >= 2) {
+      _scrollAccum += e.delta.dy;
+      final now = DateTime.now();
+      // 80ms 마다 묶어서 전송
+      if ((now.difference(_lastScrollSent).inMilliseconds >= 80) &&
+          _scrollAccum.abs() >= 6) {
+        _sendScrollAtCenter(_scrollAccum);
+        _scrollAccum = 0;
+        _lastScrollSent = now;
+      }
+    }
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    _pointers.remove(e.pointer);
+    if (_pointers.length < 2) _scrollAccum = 0;
+  }
+
+  void _onPointerCancel(PointerCancelEvent e) {
+    _pointers.remove(e.pointer);
+    if (_pointers.length < 2) _scrollAccum = 0;
+  }
+
+  /// 화면 중앙 좌표로 스크롤 이벤트 (휠 방향 = -dy: 손가락 위로 올리면 페이지 아래로)
+  void _sendScrollAtCenter(double dy) {
+    final ctx = _imageKey.currentContext;
+    if (ctx == null) return;
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final center = Offset(box.size.width / 2, box.size.height / 2);
+    final p = _toWindowCoords(center);
+    // 마우스 휠 단위: 120 = 한 줄. dy 픽셀당 ~5 곱함.
+    final delta = (-dy * 5).round();
+    _sendInput({
+      'type': 'scroll',
+      'x': p.dx.round(),
+      'y': p.dy.round(),
+      'delta_x': 0,
+      'delta_y': delta,
+    });
+  }
+
+  void _scrollButton(int dyWheel) {
+    final ctx = _imageKey.currentContext;
+    if (ctx == null) return;
+    final box = ctx.findRenderObject() as RenderBox?;
+    if (box == null) return;
+    final center = Offset(box.size.width / 2, box.size.height / 2);
+    final p = _toWindowCoords(center);
+    _sendInput({
+      'type': 'scroll',
+      'x': p.dx.round(),
+      'y': p.dy.round(),
+      'delta_x': 0,
+      'delta_y': dyWheel,
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -786,10 +855,10 @@ class _StreamPageState extends State<StreamPage> {
 
   void _onMessage(dynamic raw) {
     try {
-      final j = jsonDecode(raw as String) as Map<String, dynamic>;
-      if (j['type'] == 'frame') {
-        final b64 = j['jpeg_b64'] as String;
-        final bytes = base64Decode(b64);
+      // 바이너리 프레임 (v0.1.5 이후)
+      if (raw is Uint8List || raw is List<int>) {
+        final bytes =
+            raw is Uint8List ? raw : Uint8List.fromList(raw as List<int>);
         _frameCount++;
         final now = DateTime.now();
         final elapsed = now.difference(_lastFpsTick).inMilliseconds;
@@ -801,7 +870,11 @@ class _StreamPageState extends State<StreamPage> {
         setState(() {
           _frame = bytes;
         });
-      } else if (j['type'] == 'error') {
+        return;
+      }
+      // 텍스트 JSON 메시지 (에러 등)
+      final j = jsonDecode(raw as String) as Map<String, dynamic>;
+      if (j['type'] == 'error') {
         setState(() => _error = j['message'] as String);
       }
     } catch (_) {}
@@ -1030,26 +1103,67 @@ class _StreamPageState extends State<StreamPage> {
             ))
           : _frame == null
               ? const Center(child: CircularProgressIndicator())
-              : InteractiveViewer(
-                  // 두 손가락 핀치 = 확대 / 한 손가락 드래그 = 팬 (확대 상태일 때)
-                  minScale: 1.0,
-                  maxScale: 5.0,
-                  panEnabled: true,
-                  scaleEnabled: true,
-                  child: Center(
-                    child: GestureDetector(
-                      onTapUp: _onTap,
-                      onDoubleTapDown: _onDoubleTap,
-                      onLongPressStart: _onLongPress,
-                      child: Image.memory(
-                        _frame!,
-                        key: _imageKey,
-                        gaplessPlayback: true,
-                        fit: BoxFit.contain,
+              : Stack(
+                  children: [
+                    Listener(
+                      behavior: HitTestBehavior.translucent,
+                      onPointerDown: _onPointerDown,
+                      onPointerMove: _onPointerMove,
+                      onPointerUp: _onPointerUp,
+                      onPointerCancel: _onPointerCancel,
+                      child: InteractiveViewer(
+                        minScale: 1.0,
+                        maxScale: 5.0,
+                        panEnabled: true,
+                        scaleEnabled: true,
+                        child: Center(
+                          child: GestureDetector(
+                            onTapUp: _onTap,
+                            onDoubleTapDown: _onDoubleTap,
+                            onLongPressStart: _onLongPress,
+                            child: Image.memory(
+                              _frame!,
+                              key: _imageKey,
+                              gaplessPlayback: true,
+                              fit: BoxFit.contain,
+                            ),
+                          ),
+                        ),
                       ),
                     ),
-                  ),
+                    // 우측 가장자리 스크롤 보조 버튼
+                    Positioned(
+                      right: 8,
+                      top: 0,
+                      bottom: 0,
+                      child: Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _scrollFab(Icons.keyboard_arrow_up, () => _scrollButton(120)),
+                            const SizedBox(height: 8),
+                            _scrollFab(Icons.keyboard_arrow_down, () => _scrollButton(-120)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
+    );
+  }
+
+  Widget _scrollFab(IconData icon, VoidCallback onTap) {
+    return Material(
+      color: Colors.black.withValues(alpha: 0.4),
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Icon(icon, color: Colors.white, size: 24),
+        ),
+      ),
     );
   }
 }
