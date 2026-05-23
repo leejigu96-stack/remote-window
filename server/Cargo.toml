@@ -1,0 +1,47 @@
+[package]
+name = "remote-window-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 비동기 런타임
+tokio = { version = "1", features = ["full"] }
+# WebSocket 서버
+tokio-tungstenite = "0.24"
+# HTTP/WebSocket framework
+axum = { version = "0.7", features = ["ws"] }
+# 윈도우 캡처
+xcap = "0.0.14"
+# 이미지 인코딩 (JPEG)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# 직렬화
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 로깅
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# Base64 (이미지 송신용)
+base64 = "0.22"
+# 에러 처리
+anyhow = "1"
+# 시간
+chrono = "0.4"
+# Futures
+futures = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_Graphics_Gdi",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory"
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
