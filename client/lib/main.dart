@@ -44,7 +44,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.3';
+const String kAppVersionFallback = '0.1.4';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -630,8 +630,8 @@ class _WindowListPageState extends State<WindowListPage> {
   }
 
   void _open(WindowInfo w) {
-    _ch?.sink.close();
-    Navigator.pushReplacement(
+    // WS 는 살려둠 — 뒤로 오면 목록 그대로 (재연결 안 함)
+    Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => StreamPage(server: widget.server, window: w),
@@ -867,96 +867,125 @@ class _StreamPageState extends State<StreamPage> {
   Future<void> _showKeyboardSheet() async {
     final ctrl = TextEditingController();
     final focusNode = FocusNode();
-    bool stillOpen = true;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF1A1D22),
       builder: (ctx) {
-        // 시트 열리자마자 키보드 자동 포커스
         WidgetsBinding.instance.addPostFrameCallback((_) {
           focusNode.requestFocus();
         });
-        return Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.of(ctx).viewInsets.bottom,
-            left: 12,
-            right: 12,
-            top: 12,
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: ctrl,
-                focusNode: focusNode,
-                autofocus: true,
-                maxLines: 3,
-                minLines: 1,
-                decoration: InputDecoration(
-                  hintText: '입력 (Enter 누르면 PC로 전송)',
-                  border: const OutlineInputBorder(),
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.send),
-                    onPressed: () {
-                      _sendKey(ctrl.text);
-                      ctrl.clear();
-                    },
+        return StatefulBuilder(builder: (ctx, setSheet) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom,
+              left: 12,
+              right: 12,
+              top: 12,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: ctrl,
+                  focusNode: focusNode,
+                  autofocus: true,
+                  maxLines: 1,
+                  decoration: InputDecoration(
+                    hintText: '입력 후 ▶ 전송',
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    suffixIcon: IconButton(
+                      icon: const Icon(Icons.send),
+                      onPressed: () {
+                        _sendKey(ctrl.text);
+                        ctrl.clear();
+                        focusNode.requestFocus();
+                      },
+                    ),
                   ),
-                ),
-                onSubmitted: (txt) {
-                  _sendKey(txt);
-                  // Enter 도 같이 보냄
-                  _sendCombo(['enter']);
-                  ctrl.clear();
-                  focusNode.requestFocus();
-                },
-              ),
-              const SizedBox(height: 8),
-              // 자주 쓰는 특수키 단축 버튼들
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: [
-                  _comboChip('Enter', ['enter']),
-                  _comboChip('Tab', ['tab']),
-                  _comboChip('Esc', ['escape']),
-                  _comboChip('←', ['left']),
-                  _comboChip('→', ['right']),
-                  _comboChip('↑', ['up']),
-                  _comboChip('↓', ['down']),
-                  _comboChip('Backspace', ['backspace']),
-                  _comboChip('Ctrl+C', ['ctrl', 'c']),
-                  _comboChip('Ctrl+V', ['ctrl', 'v']),
-                  _comboChip('Ctrl+A', ['ctrl', 'a']),
-                  _comboChip('Ctrl+Z', ['ctrl', 'z']),
-                ],
-              ),
-              const SizedBox(height: 12),
-              SizedBox(
-                width: double.infinity,
-                child: TextButton(
-                  onPressed: () {
-                    stillOpen = false;
-                    Navigator.pop(ctx);
+                  onSubmitted: (txt) {
+                    _sendKey(txt);
+                    _sendCombo(['enter']);
+                    ctrl.clear();
+                    focusNode.requestFocus();
                   },
-                  child: const Text('닫기'),
                 ),
-              ),
-              const SizedBox(height: 8),
-            ],
+                const SizedBox(height: 6),
+              ],
+            ),
+          );
+        });
+      },
+    );
+    ctrl.dispose();
+    focusNode.dispose();
+  }
+
+  /// 특수키 패널 (별도 호출)
+  Future<void> _showSpecialKeysSheet() async {
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1D22),
+      builder: (ctx) {
+        Widget chip(String label, List<String> keys) => ActionChip(
+              label: Text(label),
+              onPressed: () => _sendCombo(keys),
+            );
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('특수키',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 12),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  chip('Enter', ['enter']),
+                  chip('Tab', ['tab']),
+                  chip('Esc', ['escape']),
+                  chip('Backspace', ['backspace']),
+                  chip('Delete', ['delete']),
+                  chip('Space', ['space']),
+                ]),
+                const SizedBox(height: 12),
+                const Text('방향키',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  chip('←', ['left']),
+                  chip('→', ['right']),
+                  chip('↑', ['up']),
+                  chip('↓', ['down']),
+                  chip('Home', ['home']),
+                  chip('End', ['end']),
+                  chip('PgUp', ['pageup']),
+                  chip('PgDn', ['pagedown']),
+                ]),
+                const SizedBox(height: 12),
+                const Text('단축키',
+                    style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                Wrap(spacing: 8, runSpacing: 8, children: [
+                  chip('Ctrl+C 복사', ['ctrl', 'c']),
+                  chip('Ctrl+V 붙여넣기', ['ctrl', 'v']),
+                  chip('Ctrl+X 잘라내기', ['ctrl', 'x']),
+                  chip('Ctrl+A 전체선택', ['ctrl', 'a']),
+                  chip('Ctrl+Z 실행취소', ['ctrl', 'z']),
+                  chip('Ctrl+Y 재실행', ['ctrl', 'y']),
+                  chip('Ctrl+S 저장', ['ctrl', 's']),
+                  chip('Ctrl+F 찾기', ['ctrl', 'f']),
+                  chip('Alt+Tab', ['alt', 'tab']),
+                  chip('Win+D 바탕화면', ['win', 'd']),
+                ]),
+                const SizedBox(height: 16),
+              ],
+            ),
           ),
         );
       },
-    );
-    // 시트 닫힌 후 cleanup
-    if (!stillOpen) ctrl.dispose();
-  }
-
-  Widget _comboChip(String label, List<String> keys) {
-    return ActionChip(
-      label: Text(label),
-      onPressed: () => _sendCombo(keys),
     );
   }
 
@@ -979,6 +1008,11 @@ class _StreamPageState extends State<StreamPage> {
             icon: const Icon(Icons.keyboard),
             onPressed: _showKeyboardSheet,
           ),
+          IconButton(
+            tooltip: '특수키 / 단축키',
+            icon: const Icon(Icons.keyboard_command_key),
+            onPressed: _showSpecialKeysSheet,
+          ),
           Center(
               child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -996,16 +1030,23 @@ class _StreamPageState extends State<StreamPage> {
             ))
           : _frame == null
               ? const Center(child: CircularProgressIndicator())
-              : Center(
-                  child: GestureDetector(
-                    onTapUp: _onTap,
-                    onDoubleTapDown: _onDoubleTap,
-                    onLongPressStart: _onLongPress,
-                    child: Image.memory(
-                      _frame!,
-                      key: _imageKey,
-                      gaplessPlayback: true,
-                      fit: BoxFit.contain,
+              : InteractiveViewer(
+                  // 두 손가락 핀치 = 확대 / 한 손가락 드래그 = 팬 (확대 상태일 때)
+                  minScale: 1.0,
+                  maxScale: 5.0,
+                  panEnabled: true,
+                  scaleEnabled: true,
+                  child: Center(
+                    child: GestureDetector(
+                      onTapUp: _onTap,
+                      onDoubleTapDown: _onDoubleTap,
+                      onLongPressStart: _onLongPress,
+                      child: Image.memory(
+                        _frame!,
+                        key: _imageKey,
+                        gaplessPlayback: true,
+                        fit: BoxFit.contain,
+                      ),
                     ),
                   ),
                 ),
