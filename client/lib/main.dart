@@ -369,6 +369,112 @@ class _UpdateDialogState extends State<UpdateDialog> {
 }
 
 // ─────────────────────────────────────────────────────────
+// 연결 에러 안내 위젯 (윈도우 목록 / 파일 보내기 공용)
+// ─────────────────────────────────────────────────────────
+class _ConnectionErrorView extends StatelessWidget {
+  final String server;
+  final String error;
+  final VoidCallback onRetry;
+  const _ConnectionErrorView({
+    required this.server,
+    required this.error,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const SizedBox(height: 20),
+          const Icon(Icons.signal_wifi_connected_no_internet_4,
+              color: Colors.redAccent, size: 48),
+          const SizedBox(height: 12),
+          const Text('서버 연결 실패',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          Text('주소: $server',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white60, fontSize: 13)),
+          const SizedBox(height: 4),
+          Text(error,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+          const SizedBox(height: 24),
+          const Text('확인할 것:',
+              style: TextStyle(fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          _checklistItem('① Tailscale VPN 켜져 있나요?',
+              '폰 Tailscale 앱에서 토글 ON 인지 확인. 매장 PC 가 같은 Tailnet 에 보여야 함.'),
+          const SizedBox(height: 6),
+          FilledButton.icon(
+            onPressed: () async {
+              final ok = await Tailscale.launch();
+              if (!ok && context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                      content: Text('Tailscale 앱을 열 수 없어요')),
+                );
+              }
+            },
+            icon: const Icon(Icons.open_in_new),
+            label: const Text('Tailscale 앱 열기'),
+          ),
+          const SizedBox(height: 16),
+          _checklistItem('② 매장 PC 가 켜져 있고 서버 실행 중인가요?',
+              '매장 PC 에서 F:\\remote-window\\server\\run-server.bat 더블클릭 후 "WebSocket listening on 0.0.0.0:9001" 메시지가 떠야 함.'),
+          const SizedBox(height: 16),
+          _checklistItem('③ 서버 주소가 맞나요?',
+              'Tailscale 앱에서 매장 PC 의 IP 를 확인 후 100.X.X.X:9001 형식으로 입력했나 확인.'),
+          const SizedBox(height: 24),
+          OutlinedButton.icon(
+            onPressed: onRetry,
+            icon: const Icon(Icons.refresh),
+            label: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('다시 시도'),
+            ),
+          ),
+          const SizedBox(height: 8),
+          OutlinedButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('이전으로 (주소 변경)'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _checklistItem(String title, String desc) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title,
+              style: const TextStyle(
+                  fontWeight: FontWeight.bold, fontSize: 13)),
+          const SizedBox(height: 4),
+          Text(desc,
+              style: const TextStyle(
+                  fontSize: 11, color: Colors.white70)),
+        ],
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────
 // 2) 윈도우 목록 화면
 // ─────────────────────────────────────────────────────────
 class WindowInfo {
@@ -502,12 +608,18 @@ class _WindowListPageState extends State<WindowListPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(24),
-                    child: Text(_error!,
-                        style: const TextStyle(color: Colors.redAccent)),
-                  ),
+              ? _ConnectionErrorView(
+                  server: widget.server,
+                  error: _error!,
+                  onRetry: () {
+                    setState(() {
+                      _windows = [];
+                      _loading = true;
+                      _error = null;
+                    });
+                    _ch?.sink.close();
+                    _connect();
+                  },
                 )
               : ListView.separated(
                   itemCount: _windows.length,
