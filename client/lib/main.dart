@@ -45,7 +45,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.7';
+const String kAppVersionFallback = '0.1.8';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -766,8 +766,7 @@ class _StreamPageState extends State<StreamPage> {
   final TransformationController _ivController = TransformationController();
   double get _ivScale => _ivController.value.getMaxScaleOnAxis();
 
-  // 2-손가락 스크롤 누적 (Listener 로 raw pointer 추적)
-  final Map<int, Offset> _pointers = {};
+  // 2-손가락 스크롤 누적 (IV onInteractionUpdate 콜백)
   double _scrollAccum = 0;
   DateTime _lastScrollSent = DateTime.now();
 
@@ -780,7 +779,12 @@ class _StreamPageState extends State<StreamPage> {
   void initState() {
     super.initState();
     _kbCtrl.addListener(_onKeyboardInput);
+    _kbFocus.addListener(_onKbFocusChange);
     _connect();
+  }
+
+  void _onKbFocusChange() {
+    if (mounted) setState(() {}); // PopScope.canPop 재평가
   }
 
   void _onKeyboardInput() {
@@ -817,34 +821,23 @@ class _StreamPageState extends State<StreamPage> {
     }
   }
 
-  // ─── Listener 로 raw pointer 추적 — 2손가락 스크롤만 처리 ──
-  void _onPointerDown(PointerDownEvent e) {
-    _pointers[e.pointer] = e.localPosition;
-  }
-
-  void _onPointerMove(PointerMoveEvent e) {
-    _pointers[e.pointer] = e.localPosition;
-    if (_pointers.length >= 2 && _ivScale <= 1.05) {
-      // 2손가락 + 줌 아닐 때만 스크롤
-      _scrollAccum += e.delta.dy;
-      final now = DateTime.now();
-      if (now.difference(_lastScrollSent).inMilliseconds >= 30 &&
-          _scrollAccum.abs() >= 2) {
-        _sendScrollAtCenter(_scrollAccum);
-        _scrollAccum = 0;
-        _lastScrollSent = now;
-      }
+  // ─── IV 콜백으로 2손가락 스크롤 감지 ────────────────────
+  void _onIvUpdate(ScaleUpdateDetails d) {
+    if (d.pointerCount < 2) return; // 1손가락은 패스
+    if ((d.scale - 1.0).abs() > 0.02) return; // 스케일 변하면 핀치 — IV 가 처리
+    if (_ivScale > 1.05) return; // 줌 상태면 IV 의 팬에 양보
+    _scrollAccum += d.focalPointDelta.dy;
+    final now = DateTime.now();
+    if (now.difference(_lastScrollSent).inMilliseconds >= 30 &&
+        _scrollAccum.abs() >= 2) {
+      _sendScrollAtCenter(_scrollAccum);
+      _scrollAccum = 0;
+      _lastScrollSent = now;
     }
   }
 
-  void _onPointerUp(PointerUpEvent e) {
-    _pointers.remove(e.pointer);
-    if (_pointers.length < 2) _scrollAccum = 0;
-  }
-
-  void _onPointerCancel(PointerCancelEvent e) {
-    _pointers.remove(e.pointer);
-    if (_pointers.length < 2) _scrollAccum = 0;
+  void _onIvEnd(ScaleEndDetails _) {
+    _scrollAccum = 0;
   }
 
   /// 화면 중앙 좌표로 스크롤 이벤트 전송
@@ -1054,6 +1047,7 @@ class _StreamPageState extends State<StreamPage> {
   @override
   void dispose() {
     _kbCtrl.removeListener(_onKeyboardInput);
+    _kbFocus.removeListener(_onKbFocusChange);
     _kbCtrl.dispose();
     _kbFocus.dispose();
     _ivController.dispose();
@@ -1064,7 +1058,15 @@ class _StreamPageState extends State<StreamPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      // 키보드 떠있으면 뒤로가기 1번 = 키보드 닫기 (페이지는 그대로)
+      canPop: !_kbFocus.hasFocus,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _kbFocus.hasFocus) {
+          _kbFocus.unfocus();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: Text(widget.window.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
@@ -1099,34 +1101,28 @@ class _StreamPageState extends State<StreamPage> {
               : Stack(
                   fit: StackFit.expand,
                   children: [
-                    // 비주얼 + 제스처: InteractiveViewer 가 핀치줌 + (줌 상태일 때) 팬,
-                    // Listener 가 외곽에서 raw pointer 추적해 2손가락 스크롤 감지.
-                    // GestureDetector 는 onTap / onLongPress / onDoubleTap 전용
-                    // (onScale* 와 같이 두면 Tap 이 안 먹히는 Flutter 한계)
-                    Listener(
-                      behavior: HitTestBehavior.translucent,
-                      onPointerDown: _onPointerDown,
-                      onPointerMove: _onPointerMove,
-                      onPointerUp: _onPointerUp,
-                      onPointerCancel: _onPointerCancel,
-                      child: InteractiveViewer(
-                        transformationController: _ivController,
-                        minScale: 1.0,
-                        maxScale: 5.0,
-                        panEnabled: true,
-                        scaleEnabled: true,
-                        child: Center(
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onTapUp: _onTap,
-                            onDoubleTapDown: _onDoubleTap,
-                            onLongPressStart: _onLongPress,
-                            child: Image.memory(
-                              _frame!,
-                              key: _imageKey,
-                              gaplessPlayback: true,
-                              fit: BoxFit.contain,
-                            ),
+                    // InteractiveViewer 가 핀치줌 + (줌 상태일 때) 팬 처리.
+                    // onInteractionUpdate 콜백으로 2손가락 순수 이동 감지 → 스크롤.
+                    // 내부 GestureDetector 가 tap/longpress/doubletap 처리.
+                    InteractiveViewer(
+                      transformationController: _ivController,
+                      minScale: 1.0,
+                      maxScale: 5.0,
+                      panEnabled: true,
+                      scaleEnabled: true,
+                      onInteractionUpdate: _onIvUpdate,
+                      onInteractionEnd: _onIvEnd,
+                      child: Center(
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTapUp: _onTap,
+                          onDoubleTapDown: _onDoubleTap,
+                          onLongPressStart: _onLongPress,
+                          child: Image.memory(
+                            _frame!,
+                            key: _imageKey,
+                            gaplessPlayback: true,
+                            fit: BoxFit.contain,
                           ),
                         ),
                       ),
@@ -1173,6 +1169,7 @@ class _StreamPageState extends State<StreamPage> {
                     ),
                   ],
                 ),
+      ),
     );
   }
 
