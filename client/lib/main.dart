@@ -46,7 +46,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.9';
+const String kAppVersionFallback = '0.1.10';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -763,9 +763,11 @@ class _StreamPageState extends State<StreamPage> {
 
   final GlobalKey _imageKey = GlobalKey();
 
-  // InteractiveViewer 의 cumulative 변환 — 줌 상태 추적용
-  final TransformationController _ivController = TransformationController();
-  double get _ivScale => _ivController.value.getMaxScaleOnAxis();
+  // 줌/팬 — 직접 관리 (IV 제거)
+  double _scale = 1.0;
+  double _baseScale = 1.0;
+  Offset _offset = Offset.zero;
+  Offset _baseOffset = Offset.zero;
 
   // 2-손가락 스크롤 누적 (IV onInteractionUpdate 콜백)
   double _scrollAccum = 0;
@@ -1036,7 +1038,6 @@ class _StreamPageState extends State<StreamPage> {
     _kbFocus.removeListener(_onKbFocusChange);
     _kbCtrl.dispose();
     _kbFocus.dispose();
-    _ivController.dispose();
     _ch?.sink.add(jsonEncode({'action': 'stop'}));
     _ch?.sink.close();
     super.dispose();
@@ -1090,14 +1091,13 @@ class _StreamPageState extends State<StreamPage> {
               : Stack(
                   fit: StackFit.expand,
                   children: [
-                    // 비주얼 + tap/long/double = IV + 내부 GestureDetector
-                    InteractiveViewer(
-                      transformationController: _ivController,
-                      minScale: 1.0,
-                      maxScale: 5.0,
-                      panEnabled: true,
-                      scaleEnabled: true,
-                      child: Center(
+                    // 비주얼 — 직접 Transform (IV 제거, 줌/팬/스크롤 모두 우리가 관리)
+                    Center(
+                      child: Transform(
+                        transform: Matrix4.identity()
+                          ..translate(_offset.dx, _offset.dy)
+                          ..scale(_scale),
+                        alignment: Alignment.center,
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onTapUp: _onTap,
@@ -1112,8 +1112,8 @@ class _StreamPageState extends State<StreamPage> {
                         ),
                       ),
                     ),
-                    // 별도 Scale 전용 레이어 — 2손가락 스크롤만 처리.
-                    // (Tap 없는 ScaleGestureRecognizer 라 IV/내부 GD 와 안 부딪힘)
+                    // 단일 ScaleRecognizer — 2손가락 전부 (zoom / pan / scroll)
+                    // Tap 은 위 내부 GD 가 처리 → arena 충돌 X
                     Positioned.fill(
                       child: RawGestureDetector(
                         behavior: HitTestBehavior.translucent,
@@ -1123,23 +1123,41 @@ class _StreamPageState extends State<StreamPage> {
                                   ScaleGestureRecognizer>(
                             () => ScaleGestureRecognizer(),
                             (ScaleGestureRecognizer instance) {
-                              instance.onStart = (_) {
+                              instance.onStart = (d) {
+                                _baseScale = _scale;
+                                _baseOffset = _offset;
                                 _scrollAccum = 0;
                               };
                               instance.onUpdate = (d) {
                                 if (d.pointerCount < 2) return;
-                                if ((d.scale - 1.0).abs() > 0.02) return; // 핀치
-                                if (_ivScale > 1.05) return; // 줌 상태
-                                _scrollAccum += d.focalPointDelta.dy;
-                                final now = DateTime.now();
-                                if (now
-                                            .difference(_lastScrollSent)
-                                            .inMilliseconds >=
-                                        30 &&
-                                    _scrollAccum.abs() >= 2) {
-                                  _sendScrollAtCenter(_scrollAccum);
-                                  _scrollAccum = 0;
-                                  _lastScrollSent = now;
+                                if ((d.scale - 1.0).abs() > 0.02) {
+                                  // 핀치 → 로컬 줌
+                                  setState(() {
+                                    _scale = (_baseScale * d.scale)
+                                        .clamp(1.0, 5.0);
+                                    if (_scale < 1.001) _offset = Offset.zero;
+                                  });
+                                } else {
+                                  // 순수 이동
+                                  if (_scale < 1.05) {
+                                    // 줌 아닐 때 → PC 에 스크롤 전송
+                                    _scrollAccum += d.focalPointDelta.dy;
+                                    final now = DateTime.now();
+                                    if (now
+                                                .difference(_lastScrollSent)
+                                                .inMilliseconds >=
+                                            30 &&
+                                        _scrollAccum.abs() >= 2) {
+                                      _sendScrollAtCenter(_scrollAccum);
+                                      _scrollAccum = 0;
+                                      _lastScrollSent = now;
+                                    }
+                                  } else {
+                                    // 줌 상태 → 로컬 팬
+                                    setState(() {
+                                      _offset += d.focalPointDelta;
+                                    });
+                                  }
                                 }
                               };
                               instance.onEnd = (_) {
