@@ -46,7 +46,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.10';
+const String kAppVersionFallback = '0.1.11';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -532,54 +532,58 @@ class WindowListPage extends StatefulWidget {
 class _WindowListPageState extends State<WindowListPage> {
   WebSocketChannel? _ch;
   List<WindowInfo> _windows = [];
-  Set<String> _hidden = {};  // 사용자가 숨긴 윈도우 키 (앱 단위 또는 제목 단위)
+  Set<String> _favorites = {}; // 사용자가 즐겨찾기로 추가한 윈도우 키
   String? _error;
   bool _loading = true;
-  bool _showHidden = false;  // 토글: 숨김도 표시
+  bool _showAll = false; // 토글: 즐겨찾기 안에 안 든 거까지 모두 표시
 
   @override
   void initState() {
     super.initState();
-    _loadHidden();
+    _loadFavorites();
     _connect();
   }
 
-  Future<void> _loadHidden() async {
+  Future<void> _loadFavorites() async {
     final p = await SharedPreferences.getInstance();
-    final list = p.getStringList('hidden_windows') ?? [];
-    if (mounted) setState(() => _hidden = list.toSet());
+    final list = p.getStringList('favorite_windows') ?? [];
+    if (mounted) setState(() => _favorites = list.toSet());
+    // 즐겨찾기 비어있으면 처음엔 자동으로 전체 표시 (선택할 수 있게)
+    if (_favorites.isEmpty) {
+      setState(() => _showAll = true);
+    }
   }
 
-  Future<void> _saveHidden() async {
+  Future<void> _saveFavorites() async {
     final p = await SharedPreferences.getInstance();
-    await p.setStringList('hidden_windows', _hidden.toList());
+    await p.setStringList('favorite_windows', _favorites.toList());
   }
 
   String _keyFor(WindowInfo w) {
-    // 윈도우 단위로 숨기지 말고 — 앱 + 제목 패턴으로
+    // 앱 이름 + 제목 패턴 (같은 앱의 다른 창 구분 위해)
     return '${w.appName}|${w.title}';
   }
 
-  Future<void> _toggleHide(WindowInfo w) async {
+  Future<void> _toggleFavorite(WindowInfo w) async {
     final key = _keyFor(w);
     setState(() {
-      if (_hidden.contains(key)) {
-        _hidden.remove(key);
+      if (_favorites.contains(key)) {
+        _favorites.remove(key);
       } else {
-        _hidden.add(key);
+        _favorites.add(key);
       }
     });
-    await _saveHidden();
+    await _saveFavorites();
   }
 
-  Future<void> _resetHidden() async {
-    setState(() => _hidden.clear());
-    await _saveHidden();
+  Future<void> _clearFavorites() async {
+    setState(() => _favorites.clear());
+    await _saveFavorites();
   }
 
   List<WindowInfo> get _filtered {
-    if (_showHidden) return _windows;
-    return _windows.where((w) => !_hidden.contains(_keyFor(w))).toList();
+    if (_showAll) return _windows;
+    return _windows.where((w) => _favorites.contains(_keyFor(w))).toList();
   }
 
   Future<void> _connect() async {
@@ -651,15 +655,14 @@ class _WindowListPageState extends State<WindowListPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_hidden.isEmpty
-            ? '윈도우 선택'
-            : '윈도우 선택 (숨김 ${_hidden.length})'),
+        title: Text(_showAll
+            ? '전체 윈도우 (★ 표시로 즐겨찾기 추가)'
+            : '즐겨찾기 ${_favorites.length}'),
         actions: [
           IconButton(
-            tooltip: _showHidden ? '숨김 가리기' : '숨김도 표시',
-            icon: Icon(
-                _showHidden ? Icons.visibility_off : Icons.visibility),
-            onPressed: () => setState(() => _showHidden = !_showHidden),
+            tooltip: _showAll ? '즐겨찾기만 보기' : '전체 보기',
+            icon: Icon(_showAll ? Icons.star : Icons.apps),
+            onPressed: () => setState(() => _showAll = !_showAll),
           ),
           IconButton(
             tooltip: '새로고침',
@@ -676,12 +679,12 @@ class _WindowListPageState extends State<WindowListPage> {
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
-              if (v == 'reset') _resetHidden();
+              if (v == 'reset') _clearFavorites();
             },
             itemBuilder: (_) => [
               const PopupMenuItem(
                 value: 'reset',
-                child: Text('숨김 목록 초기화'),
+                child: Text('즐겨찾기 비우기'),
               ),
             ],
           ),
@@ -703,39 +706,66 @@ class _WindowListPageState extends State<WindowListPage> {
                     _connect();
                   },
                 )
-              : ListView.separated(
-                  itemCount: _filtered.length,
-                  separatorBuilder: (_, __) =>
-                      const Divider(height: 1, color: Colors.white12),
-                  itemBuilder: (_, i) {
-                    final w = _filtered[i];
-                    final isHidden = _hidden.contains(_keyFor(w));
-                    return ListTile(
-                      leading: Icon(
-                        isHidden ? Icons.visibility_off : Icons.window,
-                        color: isHidden ? Colors.white38 : null,
-                      ),
-                      title: Text(w.title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                              color: isHidden ? Colors.white38 : null)),
-                      subtitle: Text('${w.appName}  •  ${w.width}×${w.height}',
-                          style: TextStyle(
-                              color: isHidden ? Colors.white24 : null)),
-                      trailing: IconButton(
-                        icon: Icon(
-                          isHidden ? Icons.visibility : Icons.visibility_off,
-                          size: 20,
+              : _filtered.isEmpty
+                  ? Center(
+                      child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.star_border,
+                                size: 48, color: Colors.white38),
+                            const SizedBox(height: 12),
+                            const Text('즐겨찾기에 추가된 윈도우 없음',
+                                style: TextStyle(fontSize: 16)),
+                            const SizedBox(height: 8),
+                            const Text(
+                              '우상단 ▦ 아이콘 → 전체 윈도우 → ★ 로 추가',
+                              style: TextStyle(
+                                  color: Colors.white60, fontSize: 12),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 16),
+                            FilledButton.icon(
+                              onPressed: () =>
+                                  setState(() => _showAll = true),
+                              icon: const Icon(Icons.apps),
+                              label: const Text('전체 윈도우 보기'),
+                            ),
+                          ],
                         ),
-                        tooltip: isHidden ? '다시 표시' : '숨기기',
-                        onPressed: () => _toggleHide(w),
                       ),
-                      onTap: isHidden ? null : () => _open(w),
-                      onLongPress: () => _toggleHide(w),
-                    );
-                  },
-                ),
+                    )
+                  : ListView.separated(
+                      itemCount: _filtered.length,
+                      separatorBuilder: (_, __) =>
+                          const Divider(height: 1, color: Colors.white12),
+                      itemBuilder: (_, i) {
+                        final w = _filtered[i];
+                        final isFav = _favorites.contains(_keyFor(w));
+                        return ListTile(
+                          leading: Icon(
+                            isFav ? Icons.star : Icons.window,
+                            color: isFav ? Colors.amber : Colors.white54,
+                          ),
+                          title: Text(w.title,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          subtitle: Text(
+                              '${w.appName}  •  ${w.width}×${w.height}'),
+                          trailing: IconButton(
+                            icon: Icon(
+                              isFav ? Icons.star : Icons.star_border,
+                              color: isFav ? Colors.amber : null,
+                              size: 22,
+                            ),
+                            tooltip: isFav ? '즐겨찾기 해제' : '즐겨찾기에 추가',
+                            onPressed: () => _toggleFavorite(w),
+                          ),
+                          onTap: () => _open(w),
+                          onLongPress: () => _toggleFavorite(w),
+                        );
+                      },
+                    ),
     );
   }
 }
