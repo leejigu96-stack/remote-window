@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -45,7 +46,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.8';
+const String kAppVersionFallback = '0.1.9';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -783,10 +784,6 @@ class _StreamPageState extends State<StreamPage> {
     _connect();
   }
 
-  void _onKbFocusChange() {
-    if (mounted) setState(() {}); // PopScope.canPop 재평가
-  }
-
   void _onKeyboardInput() {
     final v = _kbCtrl.value;
     // IME 조합 중이면 대기 (한글 입력 등)
@@ -814,30 +811,19 @@ class _StreamPageState extends State<StreamPage> {
   void _toggleKeyboard() {
     if (_kbFocus.hasFocus) {
       _kbFocus.unfocus();
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     } else {
       FocusScope.of(context).requestFocus(_kbFocus);
-      // 명시적으로 안드로이드 IME 호출 (autofocus 만으로 안 뜨는 경우 대비)
       SystemChannels.textInput.invokeMethod('TextInput.show');
     }
   }
 
-  // ─── IV 콜백으로 2손가락 스크롤 감지 ────────────────────
-  void _onIvUpdate(ScaleUpdateDetails d) {
-    if (d.pointerCount < 2) return; // 1손가락은 패스
-    if ((d.scale - 1.0).abs() > 0.02) return; // 스케일 변하면 핀치 — IV 가 처리
-    if (_ivScale > 1.05) return; // 줌 상태면 IV 의 팬에 양보
-    _scrollAccum += d.focalPointDelta.dy;
-    final now = DateTime.now();
-    if (now.difference(_lastScrollSent).inMilliseconds >= 30 &&
-        _scrollAccum.abs() >= 2) {
-      _sendScrollAtCenter(_scrollAccum);
-      _scrollAccum = 0;
-      _lastScrollSent = now;
+  void _onKbFocusChange() {
+    if (!_kbFocus.hasFocus) {
+      // 안전망 — 어떤 경로로든 포커스 잃으면 IME 도 명시적으로 닫기
+      SystemChannels.textInput.invokeMethod('TextInput.hide');
     }
-  }
-
-  void _onIvEnd(ScaleEndDetails _) {
-    _scrollAccum = 0;
+    if (mounted) setState(() {}); // PopScope.canPop 재평가 + 시각 표시 업데이트
   }
 
   /// 화면 중앙 좌표로 스크롤 이벤트 전송
@@ -1072,8 +1058,11 @@ class _StreamPageState extends State<StreamPage> {
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
-            tooltip: '키보드 입력',
-            icon: const Icon(Icons.keyboard),
+            tooltip: _kbFocus.hasFocus ? '키보드 끄기' : '키보드 입력',
+            icon: Icon(
+              _kbFocus.hasFocus ? Icons.keyboard_hide : Icons.keyboard,
+              color: _kbFocus.hasFocus ? Colors.greenAccent : null,
+            ),
             onPressed: _toggleKeyboard,
           ),
           IconButton(
@@ -1101,17 +1090,13 @@ class _StreamPageState extends State<StreamPage> {
               : Stack(
                   fit: StackFit.expand,
                   children: [
-                    // InteractiveViewer 가 핀치줌 + (줌 상태일 때) 팬 처리.
-                    // onInteractionUpdate 콜백으로 2손가락 순수 이동 감지 → 스크롤.
-                    // 내부 GestureDetector 가 tap/longpress/doubletap 처리.
+                    // 비주얼 + tap/long/double = IV + 내부 GestureDetector
                     InteractiveViewer(
                       transformationController: _ivController,
                       minScale: 1.0,
                       maxScale: 5.0,
                       panEnabled: true,
                       scaleEnabled: true,
-                      onInteractionUpdate: _onIvUpdate,
-                      onInteractionEnd: _onIvEnd,
                       child: Center(
                         child: GestureDetector(
                           behavior: HitTestBehavior.opaque,
@@ -1125,6 +1110,44 @@ class _StreamPageState extends State<StreamPage> {
                             fit: BoxFit.contain,
                           ),
                         ),
+                      ),
+                    ),
+                    // 별도 Scale 전용 레이어 — 2손가락 스크롤만 처리.
+                    // (Tap 없는 ScaleGestureRecognizer 라 IV/내부 GD 와 안 부딪힘)
+                    Positioned.fill(
+                      child: RawGestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        gestures: <Type, GestureRecognizerFactory>{
+                          ScaleGestureRecognizer:
+                              GestureRecognizerFactoryWithHandlers<
+                                  ScaleGestureRecognizer>(
+                            () => ScaleGestureRecognizer(),
+                            (ScaleGestureRecognizer instance) {
+                              instance.onStart = (_) {
+                                _scrollAccum = 0;
+                              };
+                              instance.onUpdate = (d) {
+                                if (d.pointerCount < 2) return;
+                                if ((d.scale - 1.0).abs() > 0.02) return; // 핀치
+                                if (_ivScale > 1.05) return; // 줌 상태
+                                _scrollAccum += d.focalPointDelta.dy;
+                                final now = DateTime.now();
+                                if (now
+                                            .difference(_lastScrollSent)
+                                            .inMilliseconds >=
+                                        30 &&
+                                    _scrollAccum.abs() >= 2) {
+                                  _sendScrollAtCenter(_scrollAccum);
+                                  _scrollAccum = 0;
+                                  _lastScrollSent = now;
+                                }
+                              };
+                              instance.onEnd = (_) {
+                                _scrollAccum = 0;
+                              };
+                            },
+                          ),
+                        },
                       ),
                     ),
                     // 우측 가장자리 스크롤 보조 버튼
@@ -1159,6 +1182,13 @@ class _StreamPageState extends State<StreamPage> {
                           enableSuggestions: false,
                           showCursor: false,
                           maxLines: 1,
+                          textInputAction: TextInputAction.send,
+                          // Enter 누르면 onSubmitted 발화 → PC 에 엔터 전송
+                          // (포커스 유지해서 키보드 계속 열린 채로 다음 입력 받기)
+                          onSubmitted: (_) {
+                            _sendCombo(['enter']);
+                            FocusScope.of(context).requestFocus(_kbFocus);
+                          },
                           decoration: const InputDecoration(
                             border: InputBorder.none,
                             contentPadding: EdgeInsets.zero,

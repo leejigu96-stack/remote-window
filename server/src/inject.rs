@@ -157,11 +157,16 @@ pub fn dispatch(window_id: u32, event: InputEvent) -> Result<()> {
             }
         }
         InputEvent::KeyCombo { keys } => {
-            // 예: ["ctrl", "c"] / ["alt", "tab"] / ["enter"] / ["backspace"]
+            // 예: ["ctrl", "c"] / ["alt", "tab"] / ["enter"]
             let vks: Vec<u16> = keys.iter().filter_map(|k| name_to_vk(k)).collect();
-            // down 순서대로
+            if vks.is_empty() {
+                tracing::warn!("KeyCombo: 알 수 없는 키 {:?}", keys);
+                return Ok(());
+            }
+            // 한 번의 SendInput 호출로 down + up 전부 — Windows 가 atomicity 보장
+            let mut inputs: Vec<INPUT> = Vec::with_capacity(vks.len() * 2);
             for vk in &vks {
-                let down = INPUT {
+                inputs.push(INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
                         ki: KEYBDINPUT {
@@ -172,12 +177,10 @@ pub fn dispatch(window_id: u32, event: InputEvent) -> Result<()> {
                             dwExtraInfo: 0,
                         },
                     },
-                };
-                send(&[down]);
+                });
             }
-            // up 역순으로
             for vk in vks.iter().rev() {
-                let up = INPUT {
+                inputs.push(INPUT {
                     r#type: INPUT_KEYBOARD,
                     Anonymous: INPUT_0 {
                         ki: KEYBDINPUT {
@@ -188,9 +191,9 @@ pub fn dispatch(window_id: u32, event: InputEvent) -> Result<()> {
                             dwExtraInfo: 0,
                         },
                     },
-                };
-                send(&[up]);
+                });
             }
+            send(&inputs);
         }
     }
     Ok(())
