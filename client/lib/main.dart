@@ -46,7 +46,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.11';
+const String kAppVersionFallback = '0.1.12';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -799,6 +799,13 @@ class _StreamPageState extends State<StreamPage> {
   Offset _offset = Offset.zero;
   Offset _baseOffset = Offset.zero;
 
+  // 디버그 카운터 (v0.1.12) — 어떤 핸들러가 firing 되는지 화면에서 확인용
+  int _dbgScaleStart = 0;
+  int _dbgScaleUpdate = 0;
+  int _dbgScrollSent = 0;
+  int _dbgPointers = 0;
+  bool _showDebug = false;
+
   // 2-손가락 스크롤 누적 (IV onInteractionUpdate 콜백)
   double _scrollAccum = 0;
   DateTime _lastScrollSent = DateTime.now();
@@ -1101,6 +1108,12 @@ class _StreamPageState extends State<StreamPage> {
             icon: const Icon(Icons.keyboard_command_key),
             onPressed: _showSpecialKeysSheet,
           ),
+          IconButton(
+            tooltip: _showDebug ? '디버그 끄기' : '디버그 켜기 (제스처 카운터)',
+            icon: Icon(_showDebug ? Icons.bug_report : Icons.bug_report_outlined,
+                color: _showDebug ? Colors.amber : null),
+            onPressed: () => setState(() => _showDebug = !_showDebug),
+          ),
           Center(
               child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8),
@@ -1121,83 +1134,145 @@ class _StreamPageState extends State<StreamPage> {
               : Stack(
                   fit: StackFit.expand,
                   children: [
-                    // 비주얼 — 직접 Transform (IV 제거, 줌/팬/스크롤 모두 우리가 관리)
+                    // 비주얼 — Transform 으로 줌/팬
                     Center(
                       child: Transform(
                         transform: Matrix4.identity()
                           ..translate(_offset.dx, _offset.dy)
                           ..scale(_scale),
                         alignment: Alignment.center,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTapUp: _onTap,
-                          onDoubleTapDown: _onDoubleTap,
-                          onLongPressStart: _onLongPress,
-                          child: Image.memory(
-                            _frame!,
-                            key: _imageKey,
-                            gaplessPlayback: true,
-                            fit: BoxFit.contain,
-                          ),
+                        child: Image.memory(
+                          _frame!,
+                          key: _imageKey,
+                          gaplessPlayback: true,
+                          fit: BoxFit.contain,
                         ),
                       ),
                     ),
-                    // 단일 ScaleRecognizer — 2손가락 전부 (zoom / pan / scroll)
-                    // Tap 은 위 내부 GD 가 처리 → arena 충돌 X
+                    // 단일 RawGestureDetector — 모든 제스처 명시적 등록
                     Positioned.fill(
-                      child: RawGestureDetector(
+                      child: Listener(
+                        // Listener 로 pointer 개수만 추적 (디버그용 + scroll-end 안전망)
                         behavior: HitTestBehavior.translucent,
-                        gestures: <Type, GestureRecognizerFactory>{
-                          ScaleGestureRecognizer:
-                              GestureRecognizerFactoryWithHandlers<
-                                  ScaleGestureRecognizer>(
-                            () => ScaleGestureRecognizer(),
-                            (ScaleGestureRecognizer instance) {
-                              instance.onStart = (d) {
-                                _baseScale = _scale;
-                                _baseOffset = _offset;
-                                _scrollAccum = 0;
-                              };
-                              instance.onUpdate = (d) {
-                                if (d.pointerCount < 2) return;
-                                if ((d.scale - 1.0).abs() > 0.02) {
-                                  // 핀치 → 로컬 줌
-                                  setState(() {
-                                    _scale = (_baseScale * d.scale)
-                                        .clamp(1.0, 5.0);
-                                    if (_scale < 1.001) _offset = Offset.zero;
-                                  });
-                                } else {
-                                  // 순수 이동
-                                  if (_scale < 1.05) {
-                                    // 줌 아닐 때 → PC 에 스크롤 전송
-                                    _scrollAccum += d.focalPointDelta.dy;
-                                    final now = DateTime.now();
-                                    if (now
-                                                .difference(_lastScrollSent)
-                                                .inMilliseconds >=
-                                            30 &&
-                                        _scrollAccum.abs() >= 2) {
-                                      _sendScrollAtCenter(_scrollAccum);
-                                      _scrollAccum = 0;
-                                      _lastScrollSent = now;
-                                    }
-                                  } else {
-                                    // 줌 상태 → 로컬 팬
-                                    setState(() {
-                                      _offset += d.focalPointDelta;
-                                    });
-                                  }
-                                }
-                              };
-                              instance.onEnd = (_) {
-                                _scrollAccum = 0;
-                              };
-                            },
-                          ),
+                        onPointerDown: (e) {
+                          _dbgPointers++;
+                          if (_showDebug && mounted) setState(() {});
                         },
+                        onPointerUp: (e) {
+                          if (_dbgPointers > 0) _dbgPointers--;
+                          if (_showDebug && mounted) setState(() {});
+                        },
+                        onPointerCancel: (e) {
+                          if (_dbgPointers > 0) _dbgPointers--;
+                          if (_showDebug && mounted) setState(() {});
+                        },
+                        child: RawGestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          gestures: <Type, GestureRecognizerFactory>{
+                            TapGestureRecognizer:
+                                GestureRecognizerFactoryWithHandlers<
+                                    TapGestureRecognizer>(
+                              () => TapGestureRecognizer(),
+                              (TapGestureRecognizer i) {
+                                i.onTapUp = _onTap;
+                              },
+                            ),
+                            DoubleTapGestureRecognizer:
+                                GestureRecognizerFactoryWithHandlers<
+                                    DoubleTapGestureRecognizer>(
+                              () => DoubleTapGestureRecognizer(),
+                              (DoubleTapGestureRecognizer i) {
+                                i.onDoubleTapDown = _onDoubleTap;
+                              },
+                            ),
+                            LongPressGestureRecognizer:
+                                GestureRecognizerFactoryWithHandlers<
+                                    LongPressGestureRecognizer>(
+                              () => LongPressGestureRecognizer(),
+                              (LongPressGestureRecognizer i) {
+                                i.onLongPressStart = _onLongPress;
+                              },
+                            ),
+                            ScaleGestureRecognizer:
+                                GestureRecognizerFactoryWithHandlers<
+                                    ScaleGestureRecognizer>(
+                              () => ScaleGestureRecognizer(),
+                              (ScaleGestureRecognizer i) {
+                                i.onStart = (d) {
+                                  _dbgScaleStart++;
+                                  _baseScale = _scale;
+                                  _baseOffset = _offset;
+                                  _scrollAccum = 0;
+                                  if (_showDebug && mounted) setState(() {});
+                                };
+                                i.onUpdate = (d) {
+                                  _dbgScaleUpdate++;
+                                  if (d.pointerCount < 2) {
+                                    if (_showDebug && mounted) setState(() {});
+                                    return;
+                                  }
+                                  if ((d.scale - 1.0).abs() > 0.02) {
+                                    // 핀치 → 로컬 줌
+                                    setState(() {
+                                      _scale = (_baseScale * d.scale)
+                                          .clamp(1.0, 5.0);
+                                      if (_scale < 1.001) {
+                                        _offset = Offset.zero;
+                                      }
+                                    });
+                                  } else {
+                                    if (_scale < 1.05) {
+                                      // 줌 아닐 때 → PC 스크롤
+                                      _scrollAccum += d.focalPointDelta.dy;
+                                      final now = DateTime.now();
+                                      if (now
+                                                  .difference(_lastScrollSent)
+                                                  .inMilliseconds >=
+                                              30 &&
+                                          _scrollAccum.abs() >= 2) {
+                                        _sendScrollAtCenter(_scrollAccum);
+                                        _dbgScrollSent++;
+                                        _scrollAccum = 0;
+                                        _lastScrollSent = now;
+                                      }
+                                    } else {
+                                      // 줌 상태 → 로컬 팬
+                                      setState(() {
+                                        _offset += d.focalPointDelta;
+                                      });
+                                    }
+                                  }
+                                  if (_showDebug && mounted) setState(() {});
+                                };
+                                i.onEnd = (_) {
+                                  _scrollAccum = 0;
+                                };
+                              },
+                            ),
+                          },
+                        ),
                       ),
                     ),
+                    // 디버그 오버레이
+                    if (_showDebug)
+                      Positioned(
+                        left: 8,
+                        top: 8,
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          color: Colors.black.withValues(alpha: 0.7),
+                          child: Text(
+                            'pts:$_dbgPointers  '
+                            'scale start:$_dbgScaleStart upd:$_dbgScaleUpdate  '
+                            'scroll:$_dbgScrollSent  '
+                            'kb:${_kbFocus.hasFocus ? "ON" : "off"}',
+                            style: const TextStyle(
+                                color: Colors.greenAccent,
+                                fontSize: 10,
+                                fontFamily: 'monospace'),
+                          ),
+                        ),
+                      ),
                     // 우측 가장자리 스크롤 보조 버튼
                     Positioned(
                       right: 8,
