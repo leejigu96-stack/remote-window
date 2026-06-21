@@ -14,6 +14,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
+import 'package:http/http.dart' as http;
 
 import 'tailscale.dart';
 import 'updater.dart';
@@ -46,7 +47,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.12';
+const String kAppVersionFallback = '0.1.13';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -189,7 +190,35 @@ class _ConnectPageState extends State<ConnectPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const SizedBox(height: 24),
+            const SizedBox(height: 16),
+            // ★ VPN 없이 상품 DB 보기 (구글드라이브 경유) — 주력 기능
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF1b9e77),
+              ),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DbViewPage()),
+              ),
+              icon: const Icon(Icons.storefront),
+              label: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 14),
+                child: Text('상품 DB 보기  ·  VPN 없이',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+              ),
+            ),
+            const SizedBox(height: 6),
+            const Text('인터넷만 있으면 됨 · VPN 불필요',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white54, fontSize: 11)),
+            const SizedBox(height: 18),
+            const Divider(color: Colors.white24),
+            const SizedBox(height: 10),
+            const Text('— 아래는 실시간 화면 보기/제어 (Tailscale 필요) —',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.white38, fontSize: 11)),
+            const SizedBox(height: 14),
             const Text('매장 PC 서버 주소', style: TextStyle(fontSize: 16)),
             const SizedBox(height: 8),
             TextField(
@@ -1608,6 +1637,267 @@ class _JobTile extends StatelessWidget {
         ),
       ),
       trailing: trailing,
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// 5) 상품 DB 보기 — 구글드라이브의 슬림 JSON 을 받아 ★네이티브 카드로 표시
+//    ★VPN 불필요 (인터넷만). 비공개 드라이브 링크라 주소 모르면 접근 불가.
+//    PC 가 15분마다 같은 파일(db.json)에 최신 DB 덮어씀 → 새로고침하면 최신.
+//    (WebView 대신 네이티브 — 새 안드로이드 의존성 0, 빌드 안정.)
+// ─────────────────────────────────────────────────────────
+Color _statusFg(String code) {
+  switch (code) {
+    case 'onsale':
+      return const Color(0xFF1b7a3d);
+    case 'in_trade':
+      return const Color(0xFFa85109);
+    case 'soldout':
+    case 'sold_out':
+    case 'is_soldout':
+      return const Color(0xFFbb3320);
+    case 'stopped':
+      return const Color(0xFF922020);
+    case 'hidden':
+      return const Color(0xFF7a3fb0);
+    default:
+      return const Color(0xFF555b61);
+  }
+}
+
+Color _statusBg(String code) {
+  switch (code) {
+    case 'onsale':
+      return const Color(0xFFdcefe2);
+    case 'in_trade':
+      return const Color(0xFFf9e2c4);
+    case 'soldout':
+    case 'sold_out':
+    case 'is_soldout':
+      return const Color(0xFFf7d4cf);
+    case 'stopped':
+      return const Color(0xFFefcfcf);
+    case 'hidden':
+      return const Color(0xFFe8ddf2);
+    default:
+      return const Color(0xFFececec);
+  }
+}
+
+class DbViewPage extends StatefulWidget {
+  const DbViewPage({super.key});
+  @override
+  State<DbViewPage> createState() => _DbViewPageState();
+}
+
+class _DbViewPageState extends State<DbViewPage> {
+  static const String _dbUrl =
+      'https://drive.google.com/uc?export=download&id=1rZZBBOSRJzEL4DpdMUdHciy5YZQH-YBS';
+
+  List<dynamic> _all = [];
+  String _updated = '';
+  bool _loading = true;
+  String? _error;
+  String _q = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final resp = await http.get(
+        Uri.parse(_dbUrl),
+        headers: {'User-Agent': 'Mozilla/5.0'},
+      ).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        throw Exception('HTTP ${resp.statusCode}');
+      }
+      final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _all = (j['products'] as List?) ?? [];
+        _updated = (j['updated'] as String?) ?? '';
+        _loading = false;
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '$e';
+        });
+      }
+    }
+  }
+
+  List<dynamic> get _filtered {
+    final q = _q.trim().toLowerCase();
+    if (q.isEmpty) return _all;
+    return _all.where((p) {
+      final s = '${p['name']} ${p['brand']} ${p['cat']}'.toLowerCase();
+      return s.contains(q);
+    }).toList();
+  }
+
+  String _won(num n) {
+    final s = n.toInt().toString();
+    final b = StringBuffer();
+    for (int i = 0; i < s.length; i++) {
+      if (i > 0 && (s.length - i) % 3 == 0) b.write(',');
+      b.write(s[i]);
+    }
+    return b.toString();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final list = _filtered;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('상품 DB'),
+        actions: [
+          if (_updated.isNotEmpty)
+            Center(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+                child: Text('$_updated 기준',
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.white54)),
+              ),
+            ),
+          IconButton(
+            tooltip: '새로고침',
+            icon: const Icon(Icons.refresh),
+            onPressed: _loading ? null : _load,
+          ),
+        ],
+      ),
+      body: _error != null
+          ? _errorView()
+          : Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+                  child: TextField(
+                    onChanged: (v) => setState(() => _q = v),
+                    decoration: InputDecoration(
+                      hintText: '상품명 · 브랜드 검색  (${_all.length})',
+                      prefixIcon: const Icon(Icons.search, size: 20),
+                      isDense: true,
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(10)),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : RefreshIndicator(
+                          onRefresh: _load,
+                          child: list.isEmpty
+                              ? ListView(children: const [
+                                  SizedBox(height: 80),
+                                  Center(
+                                      child: Text('결과 없음',
+                                          style: TextStyle(
+                                              color: Colors.white38))),
+                                ])
+                              : ListView.builder(
+                                  padding:
+                                      const EdgeInsets.fromLTRB(10, 0, 10, 20),
+                                  itemCount: list.length,
+                                  itemBuilder: (_, i) => _card(list[i]),
+                                ),
+                        ),
+                ),
+              ],
+            ),
+    );
+  }
+
+  Widget _card(dynamic p) {
+    final ch = (p['ch'] as List?) ?? [];
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      child: Padding(
+        padding: const EdgeInsets.all(13),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('${p['name']}',
+                style:
+                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5)),
+            const SizedBox(height: 3),
+            Text(
+                [p['brand'], p['cat']]
+                    .where((x) => '$x'.isNotEmpty)
+                    .join(' · '),
+                style: const TextStyle(fontSize: 12, color: Colors.white54)),
+            const SizedBox(height: 4),
+            Text('${_won((p['price'] ?? 0) as num)}원',
+                style: const TextStyle(
+                    fontSize: 14, fontWeight: FontWeight.w800)),
+            if (ch.isNotEmpty) ...[
+              const SizedBox(height: 9),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: ch.map<Widget>((c) {
+                  final lab = '${c[0]}';
+                  final raw = '${c[1]}';
+                  final code = (c is List && c.length > 2) ? '${c[2]}' : '';
+                  return Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 9, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _statusBg(code),
+                      borderRadius: BorderRadius.circular(7),
+                    ),
+                    child: Text('$lab $raw',
+                        style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.bold,
+                            color: _statusFg(code))),
+                  );
+                }).toList(),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _errorView() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.cloud_off, color: Colors.redAccent, size: 48),
+            const SizedBox(height: 12),
+            const Text('DB 를 불러오지 못했어요', style: TextStyle(fontSize: 16)),
+            const SizedBox(height: 8),
+            Text(_error ?? '',
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white60, fontSize: 12)),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _load,
+              icon: const Icon(Icons.refresh),
+              label: const Text('다시 시도'),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
