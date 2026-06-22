@@ -47,7 +47,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.13';
+const String kAppVersionFallback = '0.1.14';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1822,30 +1822,75 @@ class _DbViewPageState extends State<DbViewPage> {
     );
   }
 
+  Widget _thumb(String b64) {
+    const double sz = 62;
+    Widget placeholder() => Container(
+          width: sz,
+          height: sz,
+          decoration: BoxDecoration(
+            color: Colors.white12,
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Icon(Icons.image_outlined,
+              color: Colors.white30, size: 22),
+        );
+    if (b64.isEmpty) return placeholder();
+    try {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.memory(
+          base64Decode(b64),
+          width: sz,
+          height: sz,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, __, ___) => placeholder(),
+        ),
+      );
+    } catch (_) {
+      return placeholder();
+    }
+  }
+
   Widget _card(dynamic p) {
     final ch = (p['ch'] as List?) ?? [];
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 5),
       child: Padding(
-        padding: const EdgeInsets.all(13),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('${p['name']}',
-                style:
-                    const TextStyle(fontWeight: FontWeight.bold, fontSize: 14.5)),
-            const SizedBox(height: 3),
-            Text(
-                [p['brand'], p['cat']]
-                    .where((x) => '$x'.isNotEmpty)
-                    .join(' · '),
-                style: const TextStyle(fontSize: 12, color: Colors.white54)),
-            const SizedBox(height: 4),
-            Text('${_won((p['price'] ?? 0) as num)}원',
-                style: const TextStyle(
-                    fontSize: 14, fontWeight: FontWeight.w800)),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _thumb('${p['thumb'] ?? ''}'),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('${p['name']}',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 14.5)),
+                      const SizedBox(height: 3),
+                      Text(
+                          [p['brand'], p['cat']]
+                              .where((x) => '$x'.isNotEmpty)
+                              .join(' · '),
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.white54)),
+                      const SizedBox(height: 4),
+                      Text('${_won((p['price'] ?? 0) as num)}원',
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.w800)),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             if (ch.isNotEmpty) ...[
-              const SizedBox(height: 9),
+              const SizedBox(height: 10),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
