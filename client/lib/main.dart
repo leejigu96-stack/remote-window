@@ -15,6 +15,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import 'package:http/http.dart' as http;
+import 'package:webview_flutter/webview_flutter.dart';
 
 import 'tailscale.dart';
 import 'updater.dart';
@@ -47,7 +48,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.14';
+const String kAppVersionFallback = '0.1.15';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1640,51 +1641,11 @@ class _JobTile extends StatelessWidget {
     );
   }
 }
-
 // ─────────────────────────────────────────────────────────
-// 5) 상품 DB 보기 — 구글드라이브의 슬림 JSON 을 받아 ★네이티브 카드로 표시
-//    ★VPN 불필요 (인터넷만). 비공개 드라이브 링크라 주소 모르면 접근 불가.
-//    PC 가 15분마다 같은 파일(db.json)에 최신 DB 덮어씀 → 새로고침하면 최신.
-//    (WebView 대신 네이티브 — 새 안드로이드 의존성 0, 빌드 안정.)
+// 5) 상품 DB 보기 — 리셀온 프로그램의 그 대시보드(dashboard.html)를 그대로 표시
+//    ★프로그램 '상품 DB' = unified_db/dashboard.html. PC가 드라이브에 올린 그 파일을
+//    받아 WebView 로 렌더 → 프로그램과 똑같은 화면(모바일 반응형 카드). VPN 불필요.
 // ─────────────────────────────────────────────────────────
-Color _statusFg(String code) {
-  switch (code) {
-    case 'onsale':
-      return const Color(0xFF1b7a3d);
-    case 'in_trade':
-      return const Color(0xFFa85109);
-    case 'soldout':
-    case 'sold_out':
-    case 'is_soldout':
-      return const Color(0xFFbb3320);
-    case 'stopped':
-      return const Color(0xFF922020);
-    case 'hidden':
-      return const Color(0xFF7a3fb0);
-    default:
-      return const Color(0xFF555b61);
-  }
-}
-
-Color _statusBg(String code) {
-  switch (code) {
-    case 'onsale':
-      return const Color(0xFFdcefe2);
-    case 'in_trade':
-      return const Color(0xFFf9e2c4);
-    case 'soldout':
-    case 'sold_out':
-    case 'is_soldout':
-      return const Color(0xFFf7d4cf);
-    case 'stopped':
-      return const Color(0xFFefcfcf);
-    case 'hidden':
-      return const Color(0xFFe8ddf2);
-    default:
-      return const Color(0xFFececec);
-  }
-}
-
 class DbViewPage extends StatefulWidget {
   const DbViewPage({super.key});
   @override
@@ -1693,17 +1654,18 @@ class DbViewPage extends StatefulWidget {
 
 class _DbViewPageState extends State<DbViewPage> {
   static const String _dbUrl =
-      'https://drive.google.com/uc?export=download&id=1rZZBBOSRJzEL4DpdMUdHciy5YZQH-YBS';
+      'https://drive.google.com/uc?export=download&id=10uIxfsc06EcqBnwpMCk2QIcfECnNN1vN';
 
-  List<dynamic> _all = [];
-  String _updated = '';
+  late final WebViewController _controller;
   bool _loading = true;
   String? _error;
-  String _q = '';
 
   @override
   void initState() {
     super.initState();
+    _controller = WebViewController()
+      ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      ..setBackgroundColor(const Color(0xFFededea));
     _load();
   }
 
@@ -1716,62 +1678,32 @@ class _DbViewPageState extends State<DbViewPage> {
       final resp = await http.get(
         Uri.parse(_dbUrl),
         headers: {'User-Agent': 'Mozilla/5.0'},
-      ).timeout(const Duration(seconds: 30));
+      ).timeout(const Duration(seconds: 40));
       if (resp.statusCode != 200) {
-        throw Exception('HTTP ${resp.statusCode}');
+        throw Exception('HTTP ' + resp.statusCode.toString());
       }
-      final j = jsonDecode(utf8.decode(resp.bodyBytes)) as Map<String, dynamic>;
-      if (!mounted) return;
-      setState(() {
-        _all = (j['products'] as List?) ?? [];
-        _updated = (j['updated'] as String?) ?? '';
-        _loading = false;
-      });
+      final html = utf8.decode(resp.bodyBytes);
+      if (!html.toLowerCase().contains('<html') && !html.contains('mcards')) {
+        throw Exception('DB 형식 오류 (' + html.length.toString() + ')');
+      }
+      await _controller.loadHtmlString(html);
+      if (mounted) setState(() => _loading = false);
     } catch (e) {
       if (mounted) {
         setState(() {
           _loading = false;
-          _error = '$e';
+          _error = e.toString();
         });
       }
     }
   }
 
-  List<dynamic> get _filtered {
-    final q = _q.trim().toLowerCase();
-    if (q.isEmpty) return _all;
-    return _all.where((p) {
-      final s = '${p['name']} ${p['brand']} ${p['cat']}'.toLowerCase();
-      return s.contains(q);
-    }).toList();
-  }
-
-  String _won(num n) {
-    final s = n.toInt().toString();
-    final b = StringBuffer();
-    for (int i = 0; i < s.length; i++) {
-      if (i > 0 && (s.length - i) % 3 == 0) b.write(',');
-      b.write(s[i]);
-    }
-    return b.toString();
-  }
-
   @override
   Widget build(BuildContext context) {
-    final list = _filtered;
     return Scaffold(
       appBar: AppBar(
         title: const Text('상품 DB'),
         actions: [
-          if (_updated.isNotEmpty)
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 6),
-                child: Text('$_updated 기준',
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.white54)),
-              ),
-            ),
           IconButton(
             tooltip: '새로고침',
             icon: const Icon(Icons.refresh),
@@ -1779,170 +1711,57 @@ class _DbViewPageState extends State<DbViewPage> {
           ),
         ],
       ),
-      body: _error != null
-          ? _errorView()
-          : Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-                  child: TextField(
-                    onChanged: (v) => setState(() => _q = v),
-                    decoration: InputDecoration(
-                      hintText: '상품명 · 브랜드 검색  (${_all.length})',
-                      prefixIcon: const Icon(Icons.search, size: 20),
-                      isDense: true,
-                      border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(10)),
-                    ),
-                  ),
+      body: Stack(
+        children: [
+          WebViewWidget(controller: _controller),
+          if (_loading)
+            Container(
+              color: const Color(0xFFededea),
+              child: const Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 12),
+                    Text('상품 DB 불러오는 중…',
+                        style: TextStyle(color: Colors.black54)),
+                  ],
                 ),
-                Expanded(
-                  child: _loading
-                      ? const Center(child: CircularProgressIndicator())
-                      : RefreshIndicator(
-                          onRefresh: _load,
-                          child: list.isEmpty
-                              ? ListView(children: const [
-                                  SizedBox(height: 80),
-                                  Center(
-                                      child: Text('결과 없음',
-                                          style: TextStyle(
-                                              color: Colors.white38))),
-                                ])
-                              : ListView.builder(
-                                  padding:
-                                      const EdgeInsets.fromLTRB(10, 0, 10, 20),
-                                  itemCount: list.length,
-                                  itemBuilder: (_, i) => _card(list[i]),
-                                ),
-                        ),
-                ),
-              ],
+              ),
             ),
-    );
-  }
-
-  Widget _thumb(String b64) {
-    const double sz = 62;
-    Widget placeholder() => Container(
-          width: sz,
-          height: sz,
-          decoration: BoxDecoration(
-            color: Colors.white12,
-            borderRadius: BorderRadius.circular(10),
-          ),
-          child: const Icon(Icons.image_outlined,
-              color: Colors.white30, size: 22),
-        );
-    if (b64.isEmpty) return placeholder();
-    try {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.memory(
-          base64Decode(b64),
-          width: sz,
-          height: sz,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, __, ___) => placeholder(),
-        ),
-      );
-    } catch (_) {
-      return placeholder();
-    }
-  }
-
-  Widget _card(dynamic p) {
-    final ch = (p['ch'] as List?) ?? [];
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 5),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _thumb('${p['thumb'] ?? ''}'),
-                const SizedBox(width: 12),
-                Expanded(
+          if (_error != null)
+            Container(
+              color: const Color(0xFF101216),
+              child: Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      Text('${p['name']}',
+                      const Icon(Icons.cloud_off,
+                          color: Colors.redAccent, size: 48),
+                      const SizedBox(height: 12),
+                      const Text('DB 를 불러오지 못했어요',
+                          style: TextStyle(fontSize: 16)),
+                      const SizedBox(height: 8),
+                      Text(_error ?? '',
+                          textAlign: TextAlign.center,
                           style: const TextStyle(
-                              fontWeight: FontWeight.bold, fontSize: 14.5)),
-                      const SizedBox(height: 3),
-                      Text(
-                          [p['brand'], p['cat']]
-                              .where((x) => '$x'.isNotEmpty)
-                              .join(' · '),
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.white54)),
-                      const SizedBox(height: 4),
-                      Text('${_won((p['price'] ?? 0) as num)}원',
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.w800)),
+                              color: Colors.white60, fontSize: 12)),
+                      const SizedBox(height: 16),
+                      FilledButton.icon(
+                        onPressed: _load,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('다시 시도'),
+                      ),
                     ],
                   ),
                 ),
-              ],
-            ),
-            if (ch.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: ch.map<Widget>((c) {
-                  final lab = '${c[0]}';
-                  final raw = '${c[1]}';
-                  final code = (c is List && c.length > 2) ? '${c[2]}' : '';
-                  return Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 9, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _statusBg(code),
-                      borderRadius: BorderRadius.circular(7),
-                    ),
-                    child: Text('$lab $raw',
-                        style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.bold,
-                            color: _statusFg(code))),
-                  );
-                }).toList(),
               ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _errorView() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.cloud_off, color: Colors.redAccent, size: 48),
-            const SizedBox(height: 12),
-            const Text('DB 를 불러오지 못했어요', style: TextStyle(fontSize: 16)),
-            const SizedBox(height: 8),
-            Text(_error ?? '',
-                textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.white60, fontSize: 12)),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: _load,
-              icon: const Icon(Icons.refresh),
-              label: const Text('다시 시도'),
             ),
-          ],
-        ),
+        ],
       ),
     );
   }
 }
+
