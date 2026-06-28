@@ -49,7 +49,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.20';
+const String kAppVersionFallback = '0.1.21';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1462,9 +1462,18 @@ class _FileSendPageState extends State<FileSendPage> {
     for (final a in selected) {
       final f = await a.file;
       if (f != null) {
-        await _sendOne(f, a.title ?? '${a.id}.jpg');
+        final ok = await _sendOne(f, a.title ?? '${a.id}.jpg');
+        if (ok) await _markSent(a.id); // ★보낸 사진 기록 → 갤러리에 '보냄' 표시
       }
     }
+  }
+
+  // ★보낸 사진 id 저장 (갤러리에서 '보냄' 노란 표시용 — 카톡식)
+  static Future<void> _markSent(String assetId) async {
+    final p = await SharedPreferences.getInstance();
+    final set = (p.getStringList('sent_asset_ids') ?? <String>[]).toSet();
+    set.add(assetId);
+    await p.setStringList('sent_asset_ids', set.toList());
   }
 
   Future<void> _pickCamera() async {
@@ -1487,29 +1496,28 @@ class _FileSendPageState extends State<FileSendPage> {
     }
   }
 
-  Future<void> _sendOne(File file, String name) async {
-    if (_uploader == null || !_connected) return;
+  Future<bool> _sendOne(File file, String name) async {
+    if (_uploader == null || !_connected) return false;
     final isImg = RegExp(r'\.(jpe?g|png|gif|webp|heic|bmp)$', caseSensitive: false)
         .hasMatch(name);
+    final job = _UploadJob(
+      index: _jobs.length + 1,
+      name: name,
+      path: file.path,
+      isImage: isImg,
+    );
     setState(() {
       _busy = true;
-      _jobs.add(_UploadJob(
-        index: _jobs.length + 1,
-        name: name,
-        path: file.path,
-        isImage: isImg,
-      ));
+      _jobs.add(job);
     });
     try {
       await _uploader!.send(file);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _jobs.last.error = '$e';
-        });
-      }
+      job.error = '$e';
     }
     if (mounted) setState(() => _busy = false);
+    // 성공 = 완료경로 있고 에러 없음 (progress 리스너가 이 job 갱신)
+    return job.donePath != null && job.error == null;
   }
 
   @override
@@ -1718,6 +1726,7 @@ class _GalleryPickerPageState extends State<GalleryPickerPage> {
   final List<AssetEntity> _photos = [];
   final List<AssetEntity> _selected = []; // ★선택 순서 유지 (인덱스 = 보낼 순번)
   List<AssetPathEntity> _albums = []; // ★폴더(앨범) 목록
+  Set<String> _sentIds = {}; // ★이미 보낸 사진 id (카톡식 노란 표시)
   static final _recentFilter = FilterOptionGroup(
     orders: [const OrderOption(type: OrderOptionType.createDate, asc: false)],
   ); // ★최근순 정렬 (옛날거부터 뜨던 것 → 최근 먼저)
@@ -1735,6 +1744,8 @@ class _GalleryPickerPageState extends State<GalleryPickerPage> {
   }
 
   Future<void> _load() async {
+    final prefs = await SharedPreferences.getInstance();
+    _sentIds = (prefs.getStringList('sent_asset_ids') ?? <String>[]).toSet();
     final ps = await PhotoManager.requestPermissionExtend();
     if (!ps.hasAccess) {
       if (mounted) {
@@ -1909,6 +1920,34 @@ class _GalleryPickerPageState extends State<GalleryPickerPage> {
                             if (sel)
                               Container(
                                   color: Colors.black.withValues(alpha: 0.35)),
+                            // ★이미 보낸 사진 = 노란 테두리 + '보냄' 배지 (카톡식)
+                            if (_sentIds.contains(a.id))
+                              Positioned.fill(
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    border: Border.all(
+                                        color: Colors.amber, width: 3),
+                                  ),
+                                ),
+                              ),
+                            if (_sentIds.contains(a.id) && !sel)
+                              Positioned(
+                                bottom: 4,
+                                left: 4,
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 5, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: Colors.amber,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: const Text('보냄',
+                                      style: TextStyle(
+                                          color: Colors.black,
+                                          fontSize: 9,
+                                          fontWeight: FontWeight.bold)),
+                                ),
+                              ),
                             // ★선택 순서 번호 배지 (카톡식)
                             Positioned(
                               top: 4,
