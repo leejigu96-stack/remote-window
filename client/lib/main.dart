@@ -49,7 +49,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.19';
+const String kAppVersionFallback = '0.1.20';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1717,6 +1717,10 @@ class GalleryPickerPage extends StatefulWidget {
 class _GalleryPickerPageState extends State<GalleryPickerPage> {
   final List<AssetEntity> _photos = [];
   final List<AssetEntity> _selected = []; // ★선택 순서 유지 (인덱스 = 보낼 순번)
+  List<AssetPathEntity> _albums = []; // ★폴더(앨범) 목록
+  static final _recentFilter = FilterOptionGroup(
+    orders: [const OrderOption(type: OrderOptionType.createDate, asc: false)],
+  ); // ★최근순 정렬 (옛날거부터 뜨던 것 → 최근 먼저)
   bool _loading = true;
   String? _error;
   AssetPathEntity? _album;
@@ -1741,15 +1745,56 @@ class _GalleryPickerPageState extends State<GalleryPickerPage> {
       }
       return;
     }
+    // ★전체 앨범(폴더) 목록 — 최근순 정렬 적용
     final albums = await PhotoManager.getAssetPathList(
-        type: RequestType.image, onlyAll: true);
+        type: RequestType.image, filterOption: _recentFilter);
     if (albums.isEmpty) {
       if (mounted) setState(() { _loading = false; _error = '사진이 없어요'; });
       return;
     }
-    _album = albums.first;
+    _albums = albums;
+    _album = albums.first; // 보통 '전체'(최근순)
     await _loadMore();
     if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _switchAlbum(AssetPathEntity album) async {
+    setState(() {
+      _album = album;
+      _photos.clear();
+      _page = 0;
+      _hasMore = true;
+      _loading = true;
+    });
+    await _loadMore();
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _showAlbumPicker() async {
+    final chosen = await showModalBottomSheet<AssetPathEntity>(
+      context: context,
+      backgroundColor: const Color(0xFF1A1D22),
+      builder: (_) => SafeArea(
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            for (final al in _albums)
+              ListTile(
+                leading: const Icon(Icons.folder, color: Colors.white70),
+                title: Text(al.isAll ? '전체 (최근순)' : al.name,
+                    style: const TextStyle(color: Colors.white)),
+                trailing: _album?.id == al.id
+                    ? const Icon(Icons.check, color: Colors.greenAccent)
+                    : null,
+                onTap: () => Navigator.pop(context, al),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (chosen != null && chosen.id != _album?.id) {
+      await _switchAlbum(chosen);
+    }
   }
 
   Future<void> _loadMore() async {
@@ -1780,7 +1825,28 @@ class _GalleryPickerPageState extends State<GalleryPickerPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(_selected.isEmpty ? '사진 선택' : '사진 선택 ${_selected.length}장'),
+        // ★앨범명 탭 → 폴더(앨범) 선택 시트 (카톡처럼)
+        title: GestureDetector(
+          onTap: _albums.length > 1 ? _showAlbumPicker : null,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(
+                child: Text(
+                  _album == null
+                      ? '사진 선택'
+                      : (_album!.isAll ? '전체' : _album!.name),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (_albums.length > 1) const Icon(Icons.arrow_drop_down),
+              if (_selected.isNotEmpty)
+                Text('  ${_selected.length}장',
+                    style: const TextStyle(
+                        fontSize: 13, color: Colors.greenAccent)),
+            ],
+          ),
+        ),
         actions: [
           TextButton(
             onPressed: _selected.isEmpty
