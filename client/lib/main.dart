@@ -48,7 +48,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.15';
+const String kAppVersionFallback = '0.1.18';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1383,12 +1383,22 @@ class FileSendPage extends StatefulWidget {
 }
 
 class _UploadJob {
+  final int index; // ★보낸 순번(1부터) — 카톡처럼 순서 표시
   final String name;
+  final String? path; // ★로컬 경로 — 이미지 썸네일 미리보기용
+  final bool isImage;
   int received;
   int total;
   String? donePath;
   String? error;
-  _UploadJob({required this.name, this.received = 0, this.total = 0});
+  _UploadJob({
+    required this.index,
+    required this.name,
+    this.path,
+    this.isImage = false,
+    this.received = 0,
+    this.total = 0,
+  });
 }
 
 class _FileSendPageState extends State<FileSendPage> {
@@ -1411,7 +1421,11 @@ class _FileSendPageState extends State<FileSendPage> {
       _uploader = UploadController(_ch!);
       _uploader!.progress.listen((p) {
         if (_jobs.isEmpty) return;
-        final job = _jobs.last;
+        // ★순차 업로드라 '아직 안 끝난 첫 job'이 현재 전송 중인 파일 (last 고정 버그 수정 — 진행률이 엉뚱한 줄에 찍히던 것)
+        final job = _jobs.firstWhere(
+          (j) => j.donePath == null && j.error == null,
+          orElse: () => _jobs.last,
+        );
         if (p.error != null) {
           job.error = p.error;
         } else {
@@ -1468,9 +1482,16 @@ class _FileSendPageState extends State<FileSendPage> {
 
   Future<void> _sendOne(File file, String name) async {
     if (_uploader == null || !_connected) return;
+    final isImg = RegExp(r'\.(jpe?g|png|gif|webp|heic|bmp)$', caseSensitive: false)
+        .hasMatch(name);
     setState(() {
       _busy = true;
-      _jobs.add(_UploadJob(name: name));
+      _jobs.add(_UploadJob(
+        index: _jobs.length + 1,
+        name: name,
+        path: file.path,
+        isImage: isImg,
+      ));
     });
     try {
       await _uploader!.send(file);
@@ -1578,7 +1599,8 @@ class _FileSendPageState extends State<FileSendPage> {
                       separatorBuilder: (_, __) =>
                           const Divider(height: 1, color: Colors.white12),
                       itemBuilder: (_, i) {
-                        final j = _jobs[_jobs.length - 1 - i];
+                        // ★보낸 순서대로(1번째가 맨 위) — 카톡처럼 순서 확인용
+                        final j = _jobs[i];
                         return _JobTile(job: j);
                       },
                     ),
@@ -1624,7 +1646,41 @@ class _JobTile extends StatelessWidget {
     }
     return ListTile(
       dense: true,
-      leading: const Icon(Icons.file_present, size: 20),
+      leading: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ★순번 배지 (카톡처럼 보낸 순서 1·2·3…)
+          Container(
+            width: 22,
+            height: 22,
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              color: Color(0xFF6C5CE7),
+              shape: BoxShape.circle,
+            ),
+            child: Text('${job.index}',
+                style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white)),
+          ),
+          const SizedBox(width: 8),
+          // ★이미지면 썸네일 미리보기, 아니면 파일 아이콘
+          (job.isImage && job.path != null)
+              ? ClipRRect(
+                  borderRadius: BorderRadius.circular(4),
+                  child: Image.file(
+                    File(job.path!),
+                    width: 36,
+                    height: 36,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) =>
+                        const Icon(Icons.image, size: 20),
+                  ),
+                )
+              : const Icon(Icons.file_present, size: 20),
+        ],
+      ),
       title: Text(job.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
         job.error != null
@@ -1654,7 +1710,7 @@ class DbViewPage extends StatefulWidget {
 
 class _DbViewPageState extends State<DbViewPage> {
   static const String _dbUrl =
-      'https://drive.google.com/uc?export=download&id=10uIxfsc06EcqBnwpMCk2QIcfECnNN1vN';
+      'https://drive.google.com/uc?export=download&id=1kgqy_ly9R7RwTBbaKUMSpr8J-hdIo_R0';
 
   late final WebViewController _controller;
   bool _loading = true;
@@ -1700,7 +1756,18 @@ class _DbViewPageState extends State<DbViewPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return PopScope(
+      // 뒤로가기 = WebView 안에서 한 단계 뒤로(상품링크/모달). 더 못 가면 그때 홈으로.
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (await _controller.canGoBack()) {
+          _controller.goBack();
+        } else if (mounted) {
+          Navigator.of(context).pop();
+        }
+      },
+      child: Scaffold(
       appBar: AppBar(
         title: const Text('상품 DB'),
         actions: [
@@ -1760,6 +1827,7 @@ class _DbViewPageState extends State<DbViewPage> {
               ),
             ),
         ],
+      ),
       ),
     );
   }

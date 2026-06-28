@@ -26,6 +26,7 @@ class UploadController {
   final StreamController<UploadProgress> _progress = StreamController.broadcast();
   int? _activeUploadId;
   int _activeSize = 0;
+  Completer<void>? _doneCompleter; // ★파일별 완료(done/error) 신호 — 순차 업로드 보장
 
   UploadController(this.ch);
 
@@ -48,17 +49,23 @@ class UploadController {
         donePath: j['path'] as String?,
       ));
       _activeUploadId = null;
+      if (!(_doneCompleter?.isCompleted ?? true)) _doneCompleter!.complete();
     } else if (t == 'error') {
       _progress.add(UploadProgress(
         received: 0,
         total: _activeSize,
         error: j['message'] as String? ?? 'unknown error',
       ));
+      _activeUploadId = null;
+      if (!(_doneCompleter?.isCompleted ?? true)) _doneCompleter!.complete();
     }
   }
 
   /// 파일 하나 업로드 — 청크 1MB
   Future<void> send(File file) async {
+    // ★이전 파일 잔여 id 제거 — 안 그러면 다음 파일이 옛 id로 chunk를 보내 'session not found' (우주 2026-06-28)
+    _activeUploadId = null;
+    _doneCompleter = Completer<void>();
     final size = await file.length();
     _activeSize = size;
     final name = file.path.split(RegExp(r'[\\/]')).last;
@@ -119,6 +126,11 @@ class UploadController {
       'action': 'upload_end',
       'upload_id': _activeUploadId,
     }));
+
+    // 4) ★서버 upload_done(또는 error) 올 때까지 대기 → 다음 파일과 id 안 섞이게 순차 보장
+    try {
+      await _doneCompleter!.future.timeout(const Duration(seconds: 30));
+    } catch (_) {}
   }
 
   void dispose() {
