@@ -10,6 +10,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:photo_manager/photo_manager.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -48,7 +49,7 @@ class ConnectPage extends StatefulWidget {
 }
 
 // pubspec.yaml 의 version 과 동기화 (PackageInfo 실패 시 fallback)
-const String kAppVersionFallback = '0.1.18';
+const String kAppVersionFallback = '0.1.19';
 
 class _ConnectPageState extends State<ConnectPage> {
   final _ctrl = TextEditingController();
@@ -1452,11 +1453,17 @@ class _FileSendPageState extends State<FileSendPage> {
   }
 
   Future<void> _pickPhotos() async {
-    final picker = ImagePicker();
-    final list = await picker.pickMultiImage(imageQuality: 100);
-    if (list.isEmpty) return;
-    for (final x in list) {
-      await _sendOne(File(x.path), x.name);
+    // ★카톡식 커스텀 갤러리 — 선택 순서대로 1·2·3 번호가 뜨고, 그 순서대로 전송
+    final selected = await Navigator.push<List<AssetEntity>>(
+      context,
+      MaterialPageRoute(builder: (_) => const GalleryPickerPage()),
+    );
+    if (selected == null || selected.isEmpty) return;
+    for (final a in selected) {
+      final f = await a.file;
+      if (f != null) {
+        await _sendOne(f, a.title ?? '${a.id}.jpg');
+      }
     }
   }
 
@@ -1697,6 +1704,180 @@ class _JobTile extends StatelessWidget {
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────
+// 4-1) 카톡식 커스텀 갤러리 — 탭하면 선택 순서대로 1·2·3 번호, 그 순서로 전송
+// ─────────────────────────────────────────────────────────
+class GalleryPickerPage extends StatefulWidget {
+  const GalleryPickerPage({super.key});
+  @override
+  State<GalleryPickerPage> createState() => _GalleryPickerPageState();
+}
+
+class _GalleryPickerPageState extends State<GalleryPickerPage> {
+  final List<AssetEntity> _photos = [];
+  final List<AssetEntity> _selected = []; // ★선택 순서 유지 (인덱스 = 보낼 순번)
+  bool _loading = true;
+  String? _error;
+  AssetPathEntity? _album;
+  int _page = 0;
+  bool _hasMore = true;
+  bool _loadingMore = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final ps = await PhotoManager.requestPermissionExtend();
+    if (!ps.hasAccess) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = '사진 접근 권한이 필요해요. 설정 → RemoteWindow → 권한 → 사진 허용';
+        });
+      }
+      return;
+    }
+    final albums = await PhotoManager.getAssetPathList(
+        type: RequestType.image, onlyAll: true);
+    if (albums.isEmpty) {
+      if (mounted) setState(() { _loading = false; _error = '사진이 없어요'; });
+      return;
+    }
+    _album = albums.first;
+    await _loadMore();
+    if (mounted) setState(() => _loading = false);
+  }
+
+  Future<void> _loadMore() async {
+    if (_album == null || !_hasMore || _loadingMore) return;
+    _loadingMore = true;
+    final batch = await _album!.getAssetListPaged(page: _page, size: 60);
+    if (batch.isEmpty) {
+      _hasMore = false;
+    } else {
+      _photos.addAll(batch);
+      _page++;
+      if (mounted) setState(() {});
+    }
+    _loadingMore = false;
+  }
+
+  void _toggle(AssetEntity a) {
+    setState(() {
+      if (_selected.contains(a)) {
+        _selected.remove(a);
+      } else {
+        _selected.add(a);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_selected.isEmpty ? '사진 선택' : '사진 선택 ${_selected.length}장'),
+        actions: [
+          TextButton(
+            onPressed: _selected.isEmpty
+                ? null
+                : () => Navigator.pop(context, _selected),
+            child: Text(
+              _selected.isEmpty ? '전송' : '전송 ${_selected.length}',
+              style: TextStyle(
+                color: _selected.isEmpty ? Colors.white38 : Colors.greenAccent,
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(_error!, textAlign: TextAlign.center),
+                  ),
+                )
+              : NotificationListener<ScrollNotification>(
+                  onNotification: (n) {
+                    if (n.metrics.pixels > n.metrics.maxScrollExtent - 600) {
+                      _loadMore();
+                    }
+                    return false;
+                  },
+                  child: GridView.builder(
+                    padding: const EdgeInsets.all(2),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 3,
+                      crossAxisSpacing: 2,
+                      mainAxisSpacing: 2,
+                    ),
+                    itemCount: _photos.length,
+                    itemBuilder: (_, i) {
+                      final a = _photos[i];
+                      final idx = _selected.indexOf(a);
+                      final sel = idx >= 0;
+                      return GestureDetector(
+                        onTap: () => _toggle(a),
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            FutureBuilder<Uint8List?>(
+                              future: a.thumbnailDataWithSize(
+                                  const ThumbnailSize.square(200)),
+                              builder: (_, snap) => snap.data == null
+                                  ? Container(color: Colors.white10)
+                                  : Image.memory(snap.data!,
+                                      fit: BoxFit.cover,
+                                      gaplessPlayback: true),
+                            ),
+                            if (sel)
+                              Container(
+                                  color: Colors.black.withValues(alpha: 0.35)),
+                            // ★선택 순서 번호 배지 (카톡식)
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: Container(
+                                width: 24,
+                                height: 24,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: sel
+                                      ? const Color(0xFF6C5CE7)
+                                      : Colors.black26,
+                                  shape: BoxShape.circle,
+                                  border:
+                                      Border.all(color: Colors.white, width: 1.5),
+                                ),
+                                child: sel
+                                    ? Text('${idx + 1}',
+                                        style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.bold))
+                                    : null,
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────
 // 5) 상품 DB 보기 — 리셀온 프로그램의 그 대시보드(dashboard.html)를 그대로 표시
 //    ★프로그램 '상품 DB' = unified_db/dashboard.html. PC가 드라이브에 올린 그 파일을
